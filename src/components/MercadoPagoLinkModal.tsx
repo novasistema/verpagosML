@@ -15,6 +15,9 @@ import {
   User,
   Check,
   Copy,
+  Zap,
+  ArrowRight,
+  Info,
 } from 'lucide-react';
 import { AppServerStatus, LinkedMpAccount } from '../types';
 import { soundNotifier } from '../utils/audio';
@@ -34,7 +37,8 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
   onRefreshStatus,
   onSyncPayments,
 }) => {
-  const [activeTab, setActiveTab] = useState<'oauth' | 'token' | 'account'>('oauth');
+  // Default to the ultra-simple "easy" tab!
+  const [activeTab, setActiveTab] = useState<'easy' | 'oauth' | 'account'>('easy');
   const [clientId, setClientId] = useState(status?.clientId || '');
   const [clientSecret, setClientSecret] = useState('');
   const [accessToken, setAccessToken] = useState('');
@@ -55,7 +59,7 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
     }
   }, [status?.clientId, clientId]);
 
-  // Set default tab to account if already linked
+  // Set default tab to account if already linked, otherwise "easy"
   useEffect(() => {
     if (isOpen) {
       setErrorMessage(null);
@@ -63,7 +67,7 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
       if (linkedAccount) {
         setActiveTab('account');
       } else {
-        setActiveTab('oauth');
+        setActiveTab('easy');
       }
     }
   }, [isOpen, linkedAccount]);
@@ -90,69 +94,8 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
 
   if (!isOpen) return null;
 
-  // 1. Launch OAuth Flow in popup / new window
-  const handleOpenMercadoPagoOAuth = async () => {
-    setErrorMessage(null);
-    setSuccessMessage(null);
-
-    const targetClientId = clientId.trim() || status?.clientId || '';
-    if (!targetClientId) {
-      setErrorMessage('Por favor ingresa el Client ID (App ID) de tu aplicación de Mercado Pago para abrir la autorización.');
-      return;
-    }
-
-    try {
-      setIsLoading(true);
-
-      // Save credentials first if clientSecret provided
-      if (clientSecret) {
-        await fetch('/api/auth/mercadopago/save-app-credentials', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            clientId: targetClientId,
-            clientSecret: clientSecret.trim(),
-          }),
-        });
-      }
-
-      // Fetch official auth URL
-      const res = await fetch(`/api/auth/mercadopago/url?client_id=${encodeURIComponent(targetClientId)}`);
-      const data = await res.json();
-
-      if (!res.ok || !data.authUrl) {
-        setErrorMessage(data.error || 'No se pudo generar la URL de autorización de Mercado Pago.');
-        setIsLoading(false);
-        return;
-      }
-
-      // Open Mercado Pago in popup
-      const width = 600;
-      const height = 750;
-      const left = window.screenX + (window.outerWidth - width) / 2;
-      const top = window.screenY + (window.outerHeight - height) / 2;
-
-      const popup = window.open(
-        data.authUrl,
-        'MercadoPagoAuth',
-        `width=${width},height=${height},left=${left},top=${top},status=no,toolbar=no,menubar=no`,
-      );
-
-      if (!popup || popup.closed || typeof popup.closed === 'undefined') {
-        // Pop-up blocked, redirect in current tab
-        window.location.href = data.authUrl;
-      } else {
-        popup.focus();
-      }
-    } catch (err) {
-      setErrorMessage('Error al conectar con Mercado Pago. Verifica tu conexión.');
-      console.error(err);
-      setIsLoading(false);
-    }
-  };
-
-  // 2. Link with direct Access Token
-  const handleLinkManualToken = async (useDemo: boolean = false) => {
+  // 1. Link with simple Access Token (Easy Mode)
+  const handleLinkEasyToken = async (useDemo: boolean = false) => {
     setErrorMessage(null);
     setSuccessMessage(null);
     setIsLoading(true);
@@ -178,13 +121,70 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
       }
 
       soundNotifier.playSaleAcceptedChime();
-      setSuccessMessage('¡Cuenta de Mercado Pago vinculada correctamente!');
+      setSuccessMessage('¡Conexión exitosa con Mercado Pago! Ya puedes corroborar cobros.');
       await onRefreshStatus();
       onSyncPayments();
       setActiveTab('account');
     } catch {
       setErrorMessage('Error de conexión al vincular Mercado Pago.');
     } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // 2. Launch OAuth Flow in popup
+  const handleOpenMercadoPagoOAuth = async () => {
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    const targetClientId = clientId.trim() || status?.clientId || '';
+    if (!targetClientId) {
+      setErrorMessage('Ingresa el Número de Aplicación / Client ID de tu app en Mercado Pago.');
+      return;
+    }
+
+    try {
+      setIsLoading(true);
+
+      if (clientSecret) {
+        await fetch('/api/auth/mercadopago/save-app-credentials', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            clientId: targetClientId,
+            clientSecret: clientSecret.trim(),
+          }),
+        });
+      }
+
+      const res = await fetch(`/api/auth/mercadopago/url?client_id=${encodeURIComponent(targetClientId)}`);
+      const data = await res.json();
+
+      if (!res.ok || !data.authUrl) {
+        setErrorMessage(data.error || 'No se pudo generar la URL de autorización de Mercado Pago.');
+        setIsLoading(false);
+        return;
+      }
+
+      const width = 600;
+      const height = 750;
+      const left = window.screenX + (window.outerWidth - width) / 2;
+      const top = window.screenY + (window.outerHeight - height) / 2;
+
+      const popup = window.open(
+        data.authUrl,
+        'MercadoPagoAuth',
+        `width=${width},height=${height},left=${left},top=${top},status=no,toolbar=no,menubar=no`,
+      );
+
+      if (!popup || popup.closed || typeof popup.closed === 'undefined') {
+        window.location.href = data.authUrl;
+      } else {
+        popup.focus();
+      }
+    } catch (err) {
+      setErrorMessage('Error al conectar con Mercado Pago. Verifica tu conexión.');
+      console.error(err);
       setIsLoading(false);
     }
   };
@@ -198,7 +198,7 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
       if (res.ok) {
         await onRefreshStatus();
         setSuccessMessage('Cuenta desvinculada.');
-        setActiveTab('oauth');
+        setActiveTab('easy');
       }
     } catch {
       setErrorMessage('No se pudo desvincular la cuenta.');
@@ -231,13 +231,13 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
         {/* Header with Official Mercado Pago Blue */}
         <div className="bg-gradient-to-r from-[#009ee3] via-[#0081ba] to-[#00608e] px-6 py-5 text-white flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-2xl bg-white/20 backdrop-blur-xs border border-white/30 flex items-center justify-center text-white shadow-inner font-black text-xl">
+            <div className="w-11 h-11 rounded-2xl bg-white/20 backdrop-blur-xs border border-white/30 flex items-center justify-center text-white shadow-inner font-black text-xl shrink-0">
               MP
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-lg font-bold text-white tracking-tight">
-                  Vincular Mercado Pago
+                  Conectar Mercado Pago
                 </h2>
                 {isConfigured && (
                   <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500 text-white shadow-xs">
@@ -247,7 +247,7 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
                 )}
               </div>
               <p className="text-xs text-sky-100 mt-0.5">
-                Recibe pagos acreditados y notificaciones en vivo de tus ventas.
+                Configuración rápida en 1 paso para corroborar pagos en vivo.
               </p>
             </div>
           </div>
@@ -266,6 +266,18 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
         <div className="flex border-b border-slate-200 bg-slate-50 px-6 pt-2 gap-2 text-xs font-semibold">
           <button
             type="button"
+            onClick={() => setActiveTab('easy')}
+            className={`pb-2.5 px-3 border-b-2 transition flex items-center gap-1.5 cursor-pointer ${
+              activeTab === 'easy'
+                ? 'border-[#009ee3] text-[#009ee3] font-bold'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <Zap className="w-3.5 h-3.5 text-amber-500" />
+            <span>Modo Fácil (Recomendado)</span>
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveTab('oauth')}
             className={`pb-2.5 px-3 border-b-2 transition cursor-pointer ${
               activeTab === 'oauth'
@@ -273,18 +285,7 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
                 : 'border-transparent text-slate-500 hover:text-slate-800'
             }`}
           >
-            Vincular con tu Cuenta (OAuth)
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('token')}
-            className={`pb-2.5 px-3 border-b-2 transition cursor-pointer ${
-              activeTab === 'token'
-                ? 'border-[#009ee3] text-[#009ee3] font-bold'
-                : 'border-transparent text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            Vincular con Token / Credenciales
+            Avanzado (OAuth / Client ID)
           </button>
           {linkedAccount && (
             <button
@@ -296,7 +297,7 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
                   : 'border-transparent text-slate-500 hover:text-slate-800'
               }`}
             >
-              Cuenta Vinculada
+              Mi Cuenta Conectada
             </button>
           )}
         </div>
@@ -318,90 +319,178 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
 
         {/* Modal Body */}
         <div className="p-6 space-y-5 max-h-[72vh] overflow-y-auto">
-          {/* TAB 1: OAUTH FLOW (Official Mercado Pago Login & Authorize) */}
-          {activeTab === 'oauth' && (
+          {/* TAB: MODO FÁCIL (1 SOLO DATO: ACCESS TOKEN) */}
+          {activeTab === 'easy' && (
             <div className="space-y-4">
-              <div className="bg-sky-50 border border-sky-200/80 rounded-2xl p-4 text-xs text-sky-950">
-                <div className="font-bold flex items-center gap-1.5 text-sky-900 mb-1">
-                  <ShieldCheck className="w-4 h-4 text-[#009ee3]" />
-                  Vinculación Oficial de Mercado Pago
+              {/* Card Guía Paso a Paso Sencilla */}
+              <div className="bg-sky-50/80 border border-sky-200 rounded-2xl p-4 text-xs text-slate-700 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-sky-950 flex items-center gap-1.5 text-sm">
+                    <Zap className="w-4 h-4 text-amber-500 fill-amber-400" />
+                    ¿Cómo conectar tu Mercado Pago en 1 minuto?
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full bg-sky-200 text-sky-900 font-bold text-[10px]">
+                    Sin complicaciones
+                  </span>
                 </div>
-                <p className="leading-relaxed text-sky-800">
-                  Al presionar el botón azul, se abrirá la ventana oficial de <strong>Mercado Pago</strong> para que inicies sesión en tu cuenta y autorices a esta aplicación a recibir tus ventas y pagos al instante.
+
+                <div className="space-y-2 text-slate-600">
+                  <div className="flex items-start gap-2">
+                    <span className="w-5 h-5 rounded-full bg-[#009ee3] text-white flex items-center justify-center font-bold text-[11px] shrink-0 mt-0.5">
+                      1
+                    </span>
+                    <p>
+                      Haz clic en el botón azul para abrir tu panel de Mercado Pago.
+                    </p>
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <span className="w-5 h-5 rounded-full bg-[#009ee3] text-white flex items-center justify-center font-bold text-[11px] shrink-0 mt-0.5">
+                      2
+                    </span>
+                    <p>
+                      Entra a tu aplicación y ve a <strong>"Credenciales de producción"</strong>.
+                    </p>
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <span className="w-5 h-5 rounded-full bg-[#009ee3] text-white flex items-center justify-center font-bold text-[11px] shrink-0 mt-0.5">
+                      3
+                    </span>
+                    <p>
+                      Copia el <strong>Access Token</strong> (empieza con <code>APP_USR-...</code> o <code>TEST-...</code>) y pégalo abajo.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Botón directo a Mercado Pago */}
+                <div className="pt-1">
+                  <a
+                    href="https://www.mercadopago.com.ar/developers/panel/app"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="w-full py-2.5 px-4 rounded-xl bg-white border border-[#009ee3] hover:bg-sky-50 text-[#009ee3] font-bold text-xs shadow-xs transition flex items-center justify-center gap-2"
+                  >
+                    <span>👉 Abrir mis Credenciales en Mercado Pago</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+              </div>
+
+              {/* Input: Solo el Access Token */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-bold text-slate-800">
+                    Pega aquí tu Access Token de Mercado Pago:
+                  </label>
+                  <span className="text-[11px] text-slate-400">1 único dato requerido</span>
+                </div>
+                <div className="relative">
+                  <input
+                    id="input-mp-access-token"
+                    type="password"
+                    placeholder="APP_USR-0000000000000000-000000-..."
+                    value={accessToken}
+                    onChange={(e) => setAccessToken(e.target.value)}
+                    className="w-full text-xs font-mono bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-3 text-slate-900 focus:bg-white focus:border-[#009ee3] focus:outline-none pr-10"
+                  />
+                  <Key className="w-4 h-4 text-slate-400 absolute right-3.5 top-3.5" />
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  No necesitas saber programar ni configurar servidores: al pegar la clave el sistema queda listo al instante.
                 </p>
               </div>
 
-              {/* Big Main Action Button: Open Mercado Pago */}
+              {/* Botones de Acción */}
+              <div className="space-y-2 pt-2">
+                <button
+                  id="btn-verify-easy-token"
+                  type="button"
+                  onClick={() => handleLinkEasyToken(false)}
+                  disabled={isLoading || !accessToken.trim()}
+                  className="w-full py-3.5 px-5 rounded-xl bg-[#009ee3] hover:bg-[#008bd4] text-white font-bold text-sm shadow-md hover:shadow-lg transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40 active:scale-98"
+                >
+                  <Link2 className="w-4 h-4" />
+                  <span>{isLoading ? 'Verificando con Mercado Pago...' : 'Conectar y Comenzar a Corroborar'}</span>
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+
+                <div className="relative flex py-1 items-center">
+                  <div className="grow border-t border-slate-200"></div>
+                  <span className="shrink mx-3 text-slate-400 text-[11px]">o para probar el sistema ahora</span>
+                  <div className="grow border-t border-slate-200"></div>
+                </div>
+
+                <button
+                  id="btn-link-demo-account-easy"
+                  type="button"
+                  onClick={() => handleLinkEasyToken(true)}
+                  disabled={isLoading}
+                  className="w-full py-2.5 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs transition flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Sparkles className="w-4 h-4 text-amber-500" />
+                  <span>Activar Modo Prueba Demo (Sin Cuenta Ni Claves)</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* TAB: AVANZADO (OAUTH / CLIENT ID) */}
+          {activeTab === 'oauth' && (
+            <div className="space-y-4">
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 text-xs text-amber-900 flex items-start gap-2">
+                <Info className="w-4 h-4 shrink-0 text-amber-600 mt-0.5" />
+                <p>
+                  <strong>Nota para usuarios:</strong> Si solo quieres corroborar tus cobros en tu negocio, usa la solapa <strong>"Modo Fácil"</strong> que solo pide el Access Token. Esta pestaña avanzada es para autorizaciones multi-cuenta vía OAuth.
+                </p>
+              </div>
+
+              {/* Botón OAuth */}
               <div className="p-4 bg-slate-50 border-2 border-dashed border-sky-300 rounded-2xl text-center space-y-3">
                 <button
                   id="btn-open-mp-oauth-screen"
                   type="button"
                   onClick={handleOpenMercadoPagoOAuth}
                   disabled={isLoading}
-                  className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-[#009ee3] to-[#007cb0] hover:from-[#008ed0] hover:to-[#006e9d] text-white font-bold text-sm shadow-md hover:shadow-lg transition flex items-center justify-center gap-3 cursor-pointer active:scale-98 disabled:opacity-50"
+                  className="w-full py-3.5 px-6 rounded-2xl bg-[#009ee3] hover:bg-[#008bd4] text-white font-bold text-sm shadow-md transition flex items-center justify-center gap-2 cursor-pointer active:scale-98 disabled:opacity-50"
                 >
-                  <div className="w-6 h-6 rounded-lg bg-white/20 flex items-center justify-center text-xs font-black">
-                    MP
-                  </div>
-                  <span>{isLoading ? 'Abriendo Mercado Pago...' : 'Abrir Mercado Pago y Vincular mi Cuenta'}</span>
-                  <ExternalLink className="w-4 h-4 text-sky-200" />
+                  <span>{isLoading ? 'Abriendo...' : 'Abrir Ventana de Autorización Mercado Pago'}</span>
+                  <ExternalLink className="w-4 h-4" />
                 </button>
-
                 <p className="text-[11px] text-slate-500">
-                  Se abrirá una ventana segura de mercadopago.com.ar para autorizar la conexión.
+                  Requiere que hayas configurado tu Client ID y URL de redirección.
                 </p>
               </div>
 
-              {/* App ID / Client ID Config Accordion */}
-              <div className="space-y-3 border-t border-slate-200 pt-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-slate-700">
-                    Configuración de tu Aplicación en Mercado Pago
-                  </span>
-                  <a
-                    href="https://www.mercadopago.com.ar/developers/panel/app"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-[11px] text-[#009ee3] hover:underline font-semibold flex items-center gap-1"
-                  >
-                    <span>Panel de Desarrolladores MP</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
-                </div>
-
+              <div className="space-y-3 border-t border-slate-200 pt-3">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-600 mb-1">
-                      Client ID / App ID
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      Número de aplicación / Client ID
                     </label>
                     <input
-                      id="input-mp-client-id"
                       type="text"
-                      placeholder="Ej: 184920492810"
+                      placeholder="Ej: 7719038881949496"
                       value={clientId}
                       onChange={(e) => setClientId(e.target.value)}
-                      className="w-full text-xs font-mono bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-slate-800 focus:bg-white focus:border-[#009ee3] focus:outline-none"
+                      className="w-full text-xs font-mono bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-slate-800 focus:outline-none focus:border-[#009ee3]"
                     />
                   </div>
-
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-600 mb-1">
-                      Client Secret (Para intercambio automático)
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      Client Secret (Opcional)
                     </label>
                     <input
-                      id="input-mp-client-secret"
                       type="password"
                       placeholder="Ej: sec_0a1b2c3d..."
                       value={clientSecret}
                       onChange={(e) => setClientSecret(e.target.value)}
-                      className="w-full text-xs font-mono bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-slate-800 focus:bg-white focus:border-[#009ee3] focus:outline-none"
+                      className="w-full text-xs font-mono bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-slate-800 focus:outline-none focus:border-[#009ee3]"
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label className="block text-[11px] font-bold text-slate-600 mb-1">
-                    URL de Redirección (Configurar en Mercado Pago)
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                    URL de Redirección (Callback)
                   </label>
                   <div className="flex items-center gap-2">
                     <input
@@ -424,69 +513,7 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
             </div>
           )}
 
-          {/* TAB 2: MANUAL TOKEN / CREDENTIALS LINK */}
-          {activeTab === 'token' && (
-            <div className="space-y-4">
-              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs text-slate-700 space-y-2">
-                <div className="font-bold text-slate-900 flex items-center gap-1.5">
-                  <Key className="w-4 h-4 text-[#009ee3]" />
-                  Vincular con Access Token (Producción o Prueba)
-                </div>
-                <p className="text-slate-600 leading-relaxed">
-                  Puedes pegar tu <strong>Access Token</strong> directo (comienza con <code>APP_USR-</code> o <code>TEST-</code>) obtenido desde tus credenciales de Mercado Pago.
-                </p>
-                <a
-                  href="https://www.mercadopago.com.ar/developers/panel/app"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1 text-[#009ee3] hover:underline font-bold text-[11px]"
-                >
-                  <span>Abrir mis Credenciales en Mercado Pago</span>
-                  <ExternalLink className="w-3 h-3" />
-                </a>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Access Token de Mercado Pago
-                </label>
-                <input
-                  id="input-mp-access-token"
-                  type="password"
-                  placeholder="APP_USR-0000000000000000-000000-..."
-                  value={accessToken}
-                  onChange={(e) => setAccessToken(e.target.value)}
-                  className="w-full text-xs font-mono bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-slate-900 focus:bg-white focus:border-[#009ee3] focus:outline-none"
-                />
-              </div>
-
-              <div className="flex flex-col sm:flex-row gap-2 pt-2">
-                <button
-                  id="btn-verify-manual-token"
-                  type="button"
-                  onClick={() => handleLinkManualToken(false)}
-                  disabled={isLoading || !accessToken.trim()}
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-[#009ee3] hover:bg-[#008ed0] text-white font-bold text-xs shadow-xs transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-                >
-                  <Link2 className="w-4 h-4" />
-                  <span>{isLoading ? 'Verificando...' : 'Verificar y Conectar Token'}</span>
-                </button>
-
-                <button
-                  id="btn-link-demo-account"
-                  type="button"
-                  onClick={() => handleLinkManualToken(true)}
-                  disabled={isLoading}
-                  className="py-2.5 px-4 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-800 font-semibold text-xs transition flex items-center justify-center gap-1.5 cursor-pointer"
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-amber-600" />
-                  <span>Modo Prueba Demo</span>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 3: LINKED ACCOUNT DETAILS */}
+          {/* TAB: CUENTA VINCULADA */}
           {activeTab === 'account' && linkedAccount && (
             <div className="space-y-4">
               <div className="bg-gradient-to-br from-emerald-50 to-teal-50 border border-emerald-200 rounded-2xl p-5 space-y-4">
@@ -497,7 +524,7 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
                     </div>
                     <div>
                       <div className="text-xs font-semibold text-emerald-800 uppercase tracking-wider">
-                        Cuenta Conectada
+                        Comercio Conectado
                       </div>
                       <div className="text-sm font-bold text-emerald-950">
                         {linkedAccount.nickname}
@@ -516,7 +543,7 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
                     <span className="text-[10px] font-bold text-slate-500 uppercase">Titular</span>
                     <div className="font-semibold text-slate-800 flex items-center gap-1.5">
                       <User className="w-3.5 h-3.5 text-slate-400" />
-                      <span>{linkedAccount.firstName ? `${linkedAccount.firstName} ${linkedAccount.lastName || ''}` : 'Usuario Oficial'}</span>
+                      <span>{linkedAccount.firstName ? `${linkedAccount.firstName} ${linkedAccount.lastName || ''}` : 'Usuario Verificado'}</span>
                     </div>
                   </div>
 
@@ -536,9 +563,9 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
                   </div>
 
                   <div className="space-y-0.5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase">Método</span>
-                    <div className="font-medium text-slate-700 capitalize">
-                      {linkedAccount.authMethod === 'oauth' ? 'OAuth Oficial' : linkedAccount.authMethod === 'token' ? 'Credencial Directa' : 'Simulación de Prueba'}
+                    <span className="text-[10px] font-bold text-slate-500 uppercase">Estado</span>
+                    <div className="font-semibold text-emerald-700">
+                      Corroborando en tiempo real
                     </div>
                   </div>
                 </div>
@@ -574,8 +601,8 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
         {/* Footer */}
         <div className="bg-slate-50 px-6 py-4 border-t border-slate-100 flex items-center justify-between">
           <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
-            <HelpCircle className="w-3.5 h-3.5 text-slate-400" />
-            <span>Los pagos acreditados se corroboran y aceptan en tiempo real.</span>
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Tus pagos y transferencias se corroboran de forma segura y en vivo.</span>
           </div>
 
           <button
