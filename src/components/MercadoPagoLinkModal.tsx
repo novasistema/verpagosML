@@ -18,6 +18,8 @@ import {
   Zap,
   ArrowRight,
   Info,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { AppServerStatus, LinkedMpAccount } from '../types';
 import { soundNotifier } from '../utils/audio';
@@ -42,6 +44,7 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
   const [clientId, setClientId] = useState(status?.clientId || '');
   const [clientSecret, setClientSecret] = useState('');
   const [accessToken, setAccessToken] = useState('');
+  const [showToken, setShowToken] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -98,35 +101,84 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
   const handleLinkEasyToken = async (useDemo: boolean = false) => {
     setErrorMessage(null);
     setSuccessMessage(null);
+
+    const cleanToken = accessToken
+      .trim()
+      .replace(/^["'`\s]+/, '')
+      .replace(/["'`\s]+$/, '')
+      .trim();
+
+    // Check if user accidentally pasted Application ID (digits only like 7719038881949496)
+    if (!useDemo && /^\d+$/.test(cleanToken)) {
+      setErrorMessage(
+        '⚠️ Has pegado el "ID de aplicación" (números). El Access Token requerido está en la sección "Credenciales de producción" de tu cuenta de Mercado Pago y empieza con APP_USR-.'
+      );
+      return;
+    }
+
+    if (!useDemo && cleanToken.length < 15) {
+      setErrorMessage(
+        'Por favor ingresa un Access Token completo (comienza con APP_USR- o TEST- y tiene más de 30 caracteres).'
+      );
+      return;
+    }
+
     setIsLoading(true);
 
     try {
-      const res = await fetch('/api/auth/mercadopago/link-manual', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          accessToken: accessToken.trim(),
-          clientId: clientId.trim(),
-          clientSecret: clientSecret.trim(),
-          isDemo: useDemo,
-        }),
-      });
+      const payload = {
+        accessToken: cleanToken,
+        clientId: clientId.trim(),
+        clientSecret: clientSecret.trim(),
+        isDemo: useDemo,
+      };
 
-      const data = await res.json();
+      let res: Response;
+      try {
+        res = await fetch('/api/auth/mercadopago/link-manual', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      } catch {
+        // Fallback endpoint if browser or ad-blocker blocked the word 'mercadopago'
+        res = await fetch('/api/link-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      }
+
+      let data: any = {};
+      try {
+        data = await res.json();
+      } catch {
+        throw new Error(`El servidor devolvió una respuesta no válida (${res.status}).`);
+      }
 
       if (!res.ok) {
-        setErrorMessage(data.error || 'Error al validar el token de Mercado Pago.');
+        setErrorMessage(data.error || `Error (${res.status}) al validar el token de Mercado Pago.`);
         setIsLoading(false);
         return;
       }
 
       soundNotifier.playSaleAcceptedChime();
       setSuccessMessage('¡Conexión exitosa con Mercado Pago! Ya puedes corroborar cobros.');
-      await onRefreshStatus();
-      onSyncPayments();
+      try {
+        await onRefreshStatus();
+        onSyncPayments();
+      } catch {
+        // Non-blocking
+      }
       setActiveTab('account');
-    } catch {
-      setErrorMessage('Error de conexión al vincular Mercado Pago.');
+    } catch (err: any) {
+      console.error('Error linking MP token:', err);
+      const isFetchErr = err?.message?.toLowerCase().includes('fetch') || err?.name === 'TypeError';
+      setErrorMessage(
+        isFetchErr
+          ? 'Error de conexión: No se pudo contactar al servidor local. Si usas bloqueador de anuncios (AdBlock/Brave Shields), desactívalo para este sitio.'
+          : err?.message || 'Error de conexión al vincular Mercado Pago.'
+      );
     } finally {
       setIsLoading(false);
     }
@@ -348,7 +400,7 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
                       2
                     </span>
                     <p>
-                      Entra a tu aplicación y ve a <strong>"Credenciales de producción"</strong>.
+                      En el menú izquierdo, haz clic en <strong className="text-slate-900 bg-sky-100 px-1 py-0.5 rounded">Credenciales de producción</strong> (¡no en Detalles de la aplicación!).
                     </p>
                   </div>
                   <div className="flex items-start gap-2">
@@ -356,7 +408,7 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
                       3
                     </span>
                     <p>
-                      Copia el <strong>Access Token</strong> (empieza con <code>APP_USR-...</code> o <code>TEST-...</code>) y pégalo abajo.
+                      Copia el campo <strong className="text-slate-900">Access Token</strong> (comienza con <code className="bg-white px-1 py-0.5 rounded border border-sky-300 font-mono text-sky-800">APP_USR-</code>) y pégalo abajo.
                     </p>
                   </div>
                 </div>
@@ -386,14 +438,49 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
                 <div className="relative">
                   <input
                     id="input-mp-access-token"
-                    type="password"
+                    type={showToken ? 'text' : 'password'}
                     placeholder="APP_USR-0000000000000000-000000-..."
                     value={accessToken}
                     onChange={(e) => setAccessToken(e.target.value)}
-                    className="w-full text-xs font-mono bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-3 text-slate-900 focus:bg-white focus:border-[#009ee3] focus:outline-none pr-10"
+                    className="w-full text-xs font-mono bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-3 text-slate-900 focus:bg-white focus:border-[#009ee3] focus:outline-none pr-16"
                   />
-                  <Key className="w-4 h-4 text-slate-400 absolute right-3.5 top-3.5" />
+                  <div className="absolute right-3 top-2.5 flex items-center gap-1.5 text-slate-400">
+                    <button
+                      type="button"
+                      onClick={() => setShowToken(!showToken)}
+                      title={showToken ? 'Ocultar token' : 'Mostrar token para verificar'}
+                      className="p-1 hover:text-slate-700 cursor-pointer rounded transition"
+                    >
+                      {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                    <Key className="w-4 h-4" />
+                  </div>
                 </div>
+
+                {/* Detección inteligente si pegó el ID de aplicación por error */}
+                {accessToken.trim().length > 0 && /^\d+$/.test(accessToken.trim()) && (
+                  <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs flex items-start gap-2.5 shadow-xs">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-amber-600 mt-0.5" />
+                    <div>
+                      <p className="font-bold">⚠️ Has pegado el "ID de aplicación" ({accessToken.trim()}).</p>
+                      <p className="text-[11px] text-amber-800 mt-1 leading-relaxed">
+                        El ID numérico no es la clave de acceso. Para obtener el <strong>Access Token</strong>: en el menú lateral izquierdo de tu app en Mercado Pago, haz clic en <strong>"Credenciales de producción"</strong>. Allí encontrarás el Access Token largo que empieza con <code>APP_USR-</code>.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Advertencia si no empieza con APP_USR ni TEST */}
+                {accessToken.trim().length > 10 &&
+                  !/^\d+$/.test(accessToken.trim()) &&
+                  !accessToken.trim().startsWith('APP_USR-') &&
+                  !accessToken.trim().startsWith('TEST-') && (
+                    <div className="p-2.5 rounded-xl bg-sky-50 border border-sky-200 text-sky-900 text-[11px] flex items-center gap-2">
+                      <Info className="w-4 h-4 shrink-0 text-sky-600" />
+                      <span>Nota: En Mercado Pago, el Access Token de producción normalmente comienza con <strong>APP_USR-</strong>.</span>
+                    </div>
+                  )}
+
                 <p className="text-[11px] text-slate-500">
                   No necesitas saber programar ni configurar servidores: al pegar la clave el sistema queda listo al instante.
                 </p>

@@ -262,32 +262,59 @@ function getMpClientSecret(): string {
   return credentialsStore.clientSecret || process.env.MERCADOPAGO_CLIENT_SECRET || '';
 }
 
-async function fetchMpAccountProfile(token: string, authMethod: 'oauth' | 'token' | 'demo' = 'token'): Promise<LinkedMpAccount | null> {
-  if (!token) return null;
+interface FetchProfileResult {
+  profile: LinkedMpAccount | null;
+  error?: string;
+  isUnauthorized?: boolean;
+}
+
+async function fetchMpAccountProfile(
+  token: string,
+  authMethod: 'oauth' | 'token' | 'demo' = 'token',
+): Promise<FetchProfileResult> {
+  if (!token) return { profile: null };
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+
     const res = await fetch('https://api.mercadopago.com/users/me', {
       headers: {
         Authorization: `Bearer ${token}`,
       },
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
+
     if (res.ok) {
       const data = await res.json();
       return {
-        id: data.id,
-        nickname: data.nickname || `${data.first_name || 'Usuario'} MP`,
-        email: data.email || 'usuario@mercadopago.com',
-        firstName: data.first_name || '',
-        lastName: data.last_name || '',
-        countryId: data.country_id || 'MLA',
-        siteId: data.site_id || 'MLA',
-        linkedAt: new Date().toISOString(),
-        authMethod,
+        profile: {
+          id: data.id,
+          nickname: data.nickname || `${data.first_name || 'Comercio'} MP`,
+          email: data.email || 'usuario@mercadopago.com',
+          firstName: data.first_name || '',
+          lastName: data.last_name || '',
+          countryId: data.country_id || 'MLA',
+          siteId: data.site_id || 'MLA',
+          linkedAt: new Date().toISOString(),
+          authMethod,
+        },
       };
     }
-  } catch (err) {
+
+    if (res.status === 401 || res.status === 403) {
+      return {
+        profile: null,
+        isUnauthorized: true,
+        error: 'El Access Token ingresado no fue reconocido por Mercado Pago (inválido o expirado). Copia el Access Token de "Credenciales de producción".',
+      };
+    }
+
+    return { profile: null, error: `Mercado Pago respondió con código ${res.status}` };
+  } catch (err: unknown) {
     console.error('Error querying MP users/me:', err);
+    return { profile: null, error: 'Tiempo de espera agotado al conectar con Mercado Pago.' };
   }
-  return null;
 }
 
 // Memory store for Mercado Pago access token if configured via UI
@@ -362,8 +389,9 @@ app.get('/api/status', async (req: Request, res: Response) => {
   // Lazy populate linkedAccount details if token exists
   if (token && !credentialsStore.linkedAccount) {
     try {
-      credentialsStore.linkedAccount = await fetchMpAccountProfile(token);
-      if (credentialsStore.linkedAccount) {
+      const res = await fetchMpAccountProfile(token);
+      if (res.profile) {
+        credentialsStore.linkedAccount = res.profile;
         savePersistedCredentials();
       }
     } catch {
@@ -498,8 +526,8 @@ app.get('/api/auth/mercadopago/callback', async (req: Request, res: Response) =>
     dynamicMpToken = tokenData.access_token;
 
     // Fetch profile
-    const profile = await fetchMpAccountProfile(tokenData.access_token, 'oauth');
-    credentialsStore.linkedAccount = profile || {
+    const profileRes = await fetchMpAccountProfile(tokenData.access_token, 'oauth');
+    credentialsStore.linkedAccount = profileRes.profile || {
       id: tokenData.user_id,
       nickname: `Usuario MP #${tokenData.user_id}`,
       email: 'vinculado@mercadopago.com',
@@ -560,8 +588,8 @@ app.get('/api/auth/mercadopago/callback', async (req: Request, res: Response) =>
   }
 });
 
-// POST /api/auth/mercadopago/link-manual: Links with token or sandbox
-app.post('/api/auth/mercadopago/link-manual', async (req: Request, res: Response) => {
+// Shared handler for linking manual Mercado Pago token
+const handleLinkManualToken = async (req: Request, res: Response) => {
   const { accessToken, clientId, clientSecret, isDemo } = req.body;
 
   if (isDemo) {
@@ -585,23 +613,40 @@ app.post('/api/auth/mercadopago/link-manual', async (req: Request, res: Response
     return;
   }
 
-  if (!accessToken || typeof accessToken !== 'string' || accessToken.trim().length < 10) {
-    res.status(400).json({ error: 'Ingresa un Access Token válido (comienza con APP_USR- o TEST-)' });
+  const rawToken = String(accessToken || '');
+  const cleanToken = rawToken
+    .trim()
+    .replace(/^["'`\s]+/, '')
+    .replace(/["'`\s]+$/, '')
+    .trim();
+
+  if (!cleanToken || cleanToken.length < 15) {
+    res.status(400).json({
+      error: 'Ingresa un Access Token válido (debe tener al menos 15 caracteres y comenzar usualmente con APP_USR- o TEST-)',
+    });
     return;
   }
 
-  const cleanToken = accessToken.trim();
+  // Validate with Mercado Pago API
+  const profileRes = await fetchMpAccountProfile(cleanToken, 'token');
+
+  if (profileRes.isUnauthorized) {
+    res.status(401).json({
+      error: 'Mercado Pago rechazó este Access Token (inválido o expirado). Por favor verifica haber copiado el Access Token de tus "Credenciales de producción" en tu cuenta.',
+    });
+    return;
+  }
+
   credentialsStore.accessToken = cleanToken;
   dynamicMpToken = cleanToken;
 
   if (clientId) credentialsStore.clientId = String(clientId).trim();
   if (clientSecret) credentialsStore.clientSecret = String(clientSecret).trim();
 
-  // Validate and get profile from Mercado Pago
-  const profile = await fetchMpAccountProfile(cleanToken, 'token');
-  if (profile) {
-    credentialsStore.linkedAccount = profile;
+  if (profileRes.profile) {
+    credentialsStore.linkedAccount = profileRes.profile;
   } else {
+    // MP API might be unreachable, create fallback linked account
     credentialsStore.linkedAccount = {
       id: 'MP-' + cleanToken.slice(-8),
       nickname: 'Cuenta Mercado Pago Vinculada',
@@ -615,7 +660,11 @@ app.post('/api/auth/mercadopago/link-manual', async (req: Request, res: Response
   broadcastSSE('account:linked', credentialsStore.linkedAccount);
 
   res.json({ success: true, account: credentialsStore.linkedAccount });
-});
+};
+
+// Support both endpoint paths (in case ad-blockers block the word 'mercadopago')
+app.post('/api/auth/mercadopago/link-manual', handleLinkManualToken);
+app.post('/api/link-token', handleLinkManualToken);
 
 // POST /api/auth/mercadopago/save-app-credentials
 app.post('/api/auth/mercadopago/save-app-credentials', (req: Request, res: Response) => {
@@ -640,10 +689,18 @@ app.post('/api/auth/mercadopago/unlink', (req: Request, res: Response) => {
 app.post('/api/config/token', async (req: Request, res: Response) => {
   const { accessToken } = req.body;
   if (typeof accessToken === 'string') {
-    credentialsStore.accessToken = accessToken.trim();
+    const clean = accessToken.trim().replace(/^["'`\s]+/, '').replace(/["'`\s]+$/, '').trim();
+    credentialsStore.accessToken = clean;
     dynamicMpToken = credentialsStore.accessToken;
     if (dynamicMpToken) {
-      credentialsStore.linkedAccount = await fetchMpAccountProfile(dynamicMpToken, 'token');
+      const profileRes = await fetchMpAccountProfile(dynamicMpToken, 'token');
+      credentialsStore.linkedAccount = profileRes.profile || {
+        id: 'MP-' + clean.slice(-8),
+        nickname: 'Cuenta Mercado Pago Vinculada',
+        email: 'cuenta@mercadopago.com',
+        linkedAt: new Date().toISOString(),
+        authMethod: 'token',
+      };
     } else {
       credentialsStore.linkedAccount = null;
     }
