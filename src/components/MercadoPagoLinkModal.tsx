@@ -102,23 +102,33 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
     setErrorMessage(null);
     setSuccessMessage(null);
 
-    const cleanToken = accessToken
+    const rawToken = accessToken;
+    const cleanToken = rawToken
       .trim()
       .replace(/^["'`\s]+/, '')
       .replace(/["'`\s]+$/, '')
+      .replace(/^(bearer\s+|access_token:\s*|token:\s*)/i, '')
       .trim();
 
     // Check if user accidentally pasted Application ID (digits only like 7719038881949496)
     if (!useDemo && /^\d+$/.test(cleanToken)) {
       setErrorMessage(
-        '⚠️ Has pegado el "ID de aplicación" (números). El Access Token requerido está en la sección "Credenciales de producción" de tu cuenta de Mercado Pago y empieza con APP_USR-.'
+        '⚠️ Has pegado el "ID de aplicación" (solo números). En tu panel de Mercado Pago debes ingresar a "Credenciales de producción" y copiar el campo "Access Token" (empieza con APP_USR-).'
+      );
+      return;
+    }
+
+    // Check if user accidentally pasted Public Key (starts with APP_USR- but is short, ~36 chars without multiple blocks)
+    if (!useDemo && (cleanToken.startsWith('APP_USR-') || cleanToken.startsWith('TEST-')) && cleanToken.length < 45 && cleanToken.split('-').length <= 2) {
+      setErrorMessage(
+        '⚠️ Pareces haber pegado la "Public Key" (clave pública corta). Para consultar transferencias debes copiar el "Access Token" (clave privada más larga que empieza con APP_USR-).'
       );
       return;
     }
 
     if (!useDemo && cleanToken.length < 15) {
       setErrorMessage(
-        'Por favor ingresa un Access Token completo (comienza con APP_USR- o TEST- y tiene más de 30 caracteres).'
+        'Por favor ingresa un Access Token completo (comienza usualmente con APP_USR- o TEST- y tiene más de 30 caracteres).'
       );
       return;
     }
@@ -133,31 +143,55 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
         isDemo: useDemo,
       };
 
-      let res: Response;
-      try {
-        res = await fetch('/api/auth/mercadopago/link-manual', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-      } catch {
-        // Fallback endpoint if browser or ad-blocker blocked the word 'mercadopago'
-        res = await fetch('/api/link-token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
+      // Candidate endpoints: prioritize /api/link-token (not blocked by adblockers/Brave Shields)
+      const candidateEndpoints = ['/api/link-token', '/api/auth/mercadopago/link-manual', '/api/config/token'];
+      let res: Response | null = null;
+      let lastNetworkError: any = null;
+
+      for (const endpoint of candidateEndpoints) {
+        try {
+          const attempt = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const ct = attempt.headers.get('content-type') || '';
+          // If not a 404 HTML fallback from Vite/nginx
+          if (attempt.status !== 404 || ct.includes('application/json')) {
+            res = attempt;
+            break;
+          }
+        } catch (fetchErr) {
+          lastNetworkError = fetchErr;
+        }
       }
 
+      if (!res) {
+        throw new Error(
+          lastNetworkError?.message ||
+            'No se pudo comunicar con el servidor local. Por favor verifica que el servidor esté activo y recarga la página.'
+        );
+      }
+
+      const contentType = res.headers.get('content-type') || '';
       let data: any = {};
-      try {
-        data = await res.json();
-      } catch {
-        throw new Error(`El servidor devolvió una respuesta no válida (${res.status}).`);
+      if (contentType.includes('application/json')) {
+        try {
+          data = await res.json();
+        } catch {
+          data = {};
+        }
+      } else {
+        const textPreview = await res.text().catch(() => '');
+        console.warn('Server non-json response:', textPreview.slice(0, 100));
+        throw new Error(`El servidor devolvió una respuesta inesperada (${res.status}). Recarga la página.`);
       }
 
       if (!res.ok) {
-        setErrorMessage(data.error || `Error (${res.status}) al validar el token de Mercado Pago.`);
+        setErrorMessage(
+          data.error ||
+            `Error (${res.status}) al validar las credenciales de Mercado Pago. Verifica que el Access Token sea el correcto.`
+        );
         setIsLoading(false);
         return;
       }
@@ -176,7 +210,7 @@ export const MercadoPagoLinkModal: React.FC<MercadoPagoLinkModalProps> = ({
       const isFetchErr = err?.message?.toLowerCase().includes('fetch') || err?.name === 'TypeError';
       setErrorMessage(
         isFetchErr
-          ? 'Error de conexión: No se pudo contactar al servidor local. Si usas bloqueador de anuncios (AdBlock/Brave Shields), desactívalo para este sitio.'
+          ? 'Error de conexión: No se pudo contactar al servidor. Si usas bloqueador de anuncios (AdBlock o Brave Shields), desactívalo temporalmente o recarga la página.'
           : err?.message || 'Error de conexión al vincular Mercado Pago.'
       );
     } finally {

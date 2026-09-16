@@ -9,6 +9,7 @@ interface InstantSaleApprovalModalProps {
   onClose: () => void;
   onConfirmSale: (payment: PaymentItem) => Promise<void>;
   onRejectSale: (payment: PaymentItem) => Promise<void>;
+  operatorName?: string;
 }
 
 export function InstantSaleApprovalModal({
@@ -17,6 +18,7 @@ export function InstantSaleApprovalModal({
   onClose,
   onConfirmSale,
   onRejectSale,
+  operatorName,
 }: InstantSaleApprovalModalProps) {
   const [isProcessing, setIsProcessing] = useState(false);
   const [justApproved, setJustApproved] = useState(false);
@@ -152,6 +154,13 @@ export function InstantSaleApprovalModal({
               {payment.description && (
                 <div className="mt-3 px-3 py-1 rounded-full bg-black/10 text-[11px] font-semibold text-slate-900 max-w-[260px] truncate">
                   {payment.description}
+                </div>
+              )}
+
+              {operatorName && (
+                <div className="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/15 text-[11px] font-bold text-slate-900">
+                  <User className="w-3 h-3" />
+                  <span>Atendido por: {operatorName}</span>
                 </div>
               )}
             </>

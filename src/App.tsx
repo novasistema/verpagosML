@@ -15,6 +15,9 @@ import {
   User,
   Radio,
   ExternalLink,
+  Store,
+  Crown,
+  Users,
 } from 'lucide-react';
 import { Header } from './components/Header';
 import { StatsBar } from './components/StatsBar';
@@ -26,6 +29,7 @@ import { WebhookConfigModal } from './components/WebhookConfigModal';
 import { InstantSaleApprovalModal } from './components/InstantSaleApprovalModal';
 import { CrossDeviceSyncModal } from './components/CrossDeviceSyncModal';
 import { MercadoPagoLinkModal } from './components/MercadoPagoLinkModal';
+import { TeamShareModal } from './components/TeamShareModal';
 import { PaymentItem, AppServerStatus, VerifySalePayload } from './types';
 import { soundNotifier } from './utils/audio';
 
@@ -36,12 +40,51 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'accepted' | 'rejected'>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
+  // Multi-user company role management (Dueño vs Vendedor)
+  const [currentRole, setCurrentRole] = useState<'dueno' | 'vendedor'>(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const urlRole = params.get('rol') || params.get('role');
+      if (urlRole === 'vendedor') return 'vendedor';
+      if (urlRole === 'dueno') return 'dueno';
+      const stored = localStorage.getItem('app_user_role');
+      if (stored === 'vendedor' || stored === 'dueno') return stored;
+    }
+    return 'dueno';
+  });
+
+  const [sellerName, setSellerName] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const urlSeller = params.get('vendedor') || params.get('cajero');
+      if (urlSeller) return decodeURIComponent(urlSeller);
+      const stored = localStorage.getItem('app_seller_name');
+      if (stored) return stored;
+    }
+    return 'Vendedor Mostrador';
+  });
+
+  const handleRoleChange = (role: 'dueno' | 'vendedor') => {
+    setCurrentRole(role);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('app_user_role', role);
+    }
+  };
+
+  const handleSellerNameChange = (name: string) => {
+    setSellerName(name);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('app_seller_name', name);
+    }
+  };
+
   // Modals state
   const [selectedPaymentForAccept, setSelectedPaymentForAccept] = useState<PaymentItem | null>(null);
   const [selectedPaymentForReceipt, setSelectedPaymentForReceipt] = useState<PaymentItem | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isDeviceSyncOpen, setIsDeviceSyncOpen] = useState(false);
   const [isMpLinkOpen, setIsMpLinkOpen] = useState(false);
+  const [isTeamShareOpen, setIsTeamShareOpen] = useState(false);
   const [connectedDevicesCount, setConnectedDevicesCount] = useState(1);
   const [isMobileAudioUnlocked, setIsMobileAudioUnlocked] = useState(false);
 
@@ -62,17 +105,20 @@ export default function App() {
     try {
       const res = await fetch('/api/payments');
       if (res.ok) {
-        const data = await res.json();
-        const items: PaymentItem[] = data.payments || [];
-        setPayments(items);
+        const ct = res.headers.get('content-type') || '';
+        if (ct.includes('application/json')) {
+          const data = await res.json();
+          const items: PaymentItem[] = data.payments || [];
+          setPayments(items);
 
-        // Auto notification on entry: jump straight to approving pending payment
-        if (!hasAutoPromptedOnLoad && items.length > 0) {
-          const pending = items.find((p) => p.saleVerification.status === 'pending');
-          if (pending) {
-            setInstantApprovalPayment(pending);
-            setHasAutoPromptedOnLoad(true);
-            soundNotifier.playPaymentChime();
+          // Auto notification on entry: jump straight to approving pending payment
+          if (!hasAutoPromptedOnLoad && items.length > 0) {
+            const pending = items.find((p) => p.saleVerification.status === 'pending');
+            if (pending) {
+              setInstantApprovalPayment(pending);
+              setHasAutoPromptedOnLoad(true);
+              soundNotifier.playPaymentChime();
+            }
           }
         }
       }
@@ -86,8 +132,11 @@ export default function App() {
     try {
       const res = await fetch('/api/status');
       if (res.ok) {
-        const data = await res.json();
-        setServerStatus(data);
+        const ct = res.headers.get('content-type') || '';
+        if (ct.includes('application/json')) {
+          const data = await res.json();
+          setServerStatus(data);
+        }
       }
     } catch (err) {
       console.error('Error fetching status:', err);
@@ -287,6 +336,7 @@ export default function App() {
   const handleConfirmInstantSale = async (payment: PaymentItem) => {
     try {
       const generatedTicket = `TK-${Date.now().toString().slice(-6)}`;
+      const operator = currentRole === 'vendedor' ? (sellerName || 'Vendedor Mostrador') : 'Dueño / Admin';
       const res = await fetch(`/api/payments/${payment.id}/verify-sale`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -294,7 +344,7 @@ export default function App() {
           status: 'accepted',
           saleTicketNumber: generatedTicket,
           productOrConcept: payment.description || 'Cobro por Mostrador / Transferencia',
-          acceptedBy: 'Dueño / Vendedor',
+          acceptedBy: operator,
           internalNotes: 'Confirmado desde la pantalla de cobro rápido',
         }),
       });
@@ -314,12 +364,13 @@ export default function App() {
   // Handler: Reject sale from instant phone notification ("No es mi venta")
   const handleRejectInstantSale = async (payment: PaymentItem) => {
     try {
+      const operator = currentRole === 'vendedor' ? (sellerName || 'Vendedor Mostrador') : 'Dueño / Admin';
       const res = await fetch(`/api/payments/${payment.id}/verify-sale`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           status: 'rejected',
-          acceptedBy: 'Dueño / Vendedor',
+          acceptedBy: operator,
           internalNotes: 'No es mi venta - Descartado desde la pantalla de notificación',
         }),
       });
@@ -468,6 +519,7 @@ export default function App() {
         onSync={handleSyncMercadoPago}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenDeviceSync={() => setIsDeviceSyncOpen(true)}
+        onOpenTeamShare={() => setIsTeamShareOpen(true)}
         onOpenMpLink={() => setIsMpLinkOpen(true)}
         isSyncing={isSyncing}
         isSimulating={isSimulating}
@@ -480,6 +532,10 @@ export default function App() {
           const pending = payments.find((p) => p.saleVerification.status === 'pending');
           if (pending) setInstantApprovalPayment(pending);
         }}
+        currentRole={currentRole}
+        onChangeRole={handleRoleChange}
+        sellerName={sellerName}
+        onChangeSellerName={handleSellerNameChange}
       />
 
       {/* Sync feedback banner */}
@@ -491,6 +547,47 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6 flex-1">
+        {/* Seller Info Banner if active in seller mode */}
+        {currentRole === 'vendedor' && (
+          <div className="mb-5 bg-sky-50 border border-sky-200 rounded-2xl p-3.5 sm:p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-sky-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                <Store className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-sky-950 uppercase tracking-wider">
+                    Modo Vendedor Activo
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-sky-200 text-sky-900">
+                    {sellerName}
+                  </span>
+                </div>
+                <p className="text-xs text-sky-800 mt-0.5">
+                  Conectado a la cuenta central de Mercado Pago. Puedes verificar transferencias en el mostrador sin necesidad de contraseñas.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setIsTeamShareOpen(true)}
+                className="text-xs font-bold text-sky-700 hover:text-sky-900 px-3 py-1.5 rounded-xl bg-white border border-sky-200 shadow-xs hover:bg-sky-50 transition flex items-center gap-1.5 cursor-pointer"
+              >
+                <Users className="w-3.5 h-3.5" />
+                <span>Invitar otro Vendedor</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleRoleChange('dueno')}
+                className="text-xs text-slate-600 hover:text-slate-900 font-semibold px-2.5 py-1.5 rounded-xl hover:bg-sky-100/60 transition cursor-pointer"
+              >
+                Cambiar a Dueño
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Statistics Bar */}
         <StatsBar payments={payments} />
 
@@ -781,6 +878,7 @@ export default function App() {
         isOpen={Boolean(selectedPaymentForAccept)}
         onClose={() => setSelectedPaymentForAccept(null)}
         onConfirm={handleConfirmAcceptSale}
+        defaultAcceptedBy={currentRole === 'vendedor' ? (sellerName || 'Vendedor Mostrador') : 'Caja Central'}
       />
 
       {/* Modal: Comprobante / Voucher Imprimible */}
@@ -807,6 +905,20 @@ export default function App() {
         onClose={() => setInstantApprovalPayment(null)}
         onConfirmSale={handleConfirmInstantSale}
         onRejectSale={handleRejectInstantSale}
+        operatorName={currentRole === 'vendedor' ? (sellerName || 'Vendedor Mostrador') : 'Dueño / Admin'}
+      />
+
+      {/* Modal: Compartir con el Equipo (Dueño & Vendedores) */}
+      <TeamShareModal
+        isOpen={isTeamShareOpen}
+        onClose={() => setIsTeamShareOpen(false)}
+        appUrl={serverStatus?.appUrl || ''}
+        connectedDevices={connectedDevicesCount}
+        onSimulateTestPayment={handleSimulatePayment}
+        currentRole={currentRole}
+        onChangeRole={handleRoleChange}
+        sellerName={sellerName}
+        onChangeSellerName={handleSellerNameChange}
       />
 
       {/* Modal: Sincronización Multi-Dispositivo & QR para Celulares */}

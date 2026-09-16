@@ -7,6 +7,7 @@ interface AcceptSaleModalProps {
   isOpen: boolean;
   onClose: () => void;
   onConfirm: (payload: VerifySalePayload) => Promise<void>;
+  defaultAcceptedBy?: string;
 }
 
 export function AcceptSaleModal({
@@ -14,10 +15,11 @@ export function AcceptSaleModal({
   isOpen,
   onClose,
   onConfirm,
+  defaultAcceptedBy,
 }: AcceptSaleModalProps) {
   const [saleTicketNumber, setSaleTicketNumber] = useState('');
   const [productOrConcept, setProductOrConcept] = useState('');
-  const [acceptedBy, setAcceptedBy] = useState('Caja Central');
+  const [acceptedBy, setAcceptedBy] = useState(defaultAcceptedBy || 'Caja Central');
   const [internalNotes, setInternalNotes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -27,9 +29,10 @@ export function AcceptSaleModal({
       const autoNum = `VTA-${new Date().getFullYear()}-${Date.now().toString().slice(-5)}`;
       setSaleTicketNumber(autoNum);
       setProductOrConcept(payment.description || 'Venta de mercadería');
+      setAcceptedBy(defaultAcceptedBy || 'Caja Central');
       setInternalNotes('');
     }
-  }, [payment]);
+  }, [payment, defaultAcceptedBy]);
 
   if (!isOpen || !payment) return null;
 

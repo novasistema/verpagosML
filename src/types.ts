@@ -77,3 +77,10 @@ export interface VerifySalePayload {
   acceptedBy: string;
   internalNotes?: string;
 }
+
+export type UserRole = 'dueno' | 'vendedor';
+
+export interface UserProfile {
+  role: UserRole;
+  userName: string;
+}
