@@ -5,15 +5,13 @@ import {
   Volume2,
   VolumeX,
   RefreshCw,
-  Settings,
   Sparkles,
   Smartphone,
   ExternalLink,
   Users,
   Crown,
   Store,
-  ChevronDown,
-  Lock,
+  LogOut,
 } from 'lucide-react';
 import { soundNotifier } from '../utils/audio';
 import { LinkedMpAccount } from '../types';
@@ -22,49 +20,46 @@ interface HeaderProps {
   isConnected: boolean;
   onSimulate: () => void;
   onSync: () => void;
-  onOpenSettings: () => void;
   onOpenDeviceSync: () => void;
   onOpenTeamShare: () => void;
   onOpenMpLink: () => void;
+  onLogout: () => void;
   isSyncing: boolean;
   isSimulating: boolean;
   hasPending?: boolean;
   pendingCount?: number;
-  connectedDevices?: number;
   linkedAccount?: LinkedMpAccount | null;
   isMpConfigured?: boolean;
+  needsReauth?: boolean;
+  allowSimulation?: boolean;
   onOpenPendingApproval?: () => void;
-  currentRole: 'dueno' | 'vendedor';
-  onChangeRole: (role: 'dueno' | 'vendedor') => void;
-  sellerName: string;
-  onChangeSellerName: (name: string) => void;
+  isOwner: boolean;
+  userName: string;
+  businessName: string;
 }
 
 export function Header({
   isConnected,
   onSimulate,
   onSync,
-  onOpenSettings,
   onOpenDeviceSync,
   onOpenTeamShare,
   onOpenMpLink,
+  onLogout,
   isSyncing,
   isSimulating,
   hasPending,
   pendingCount = 0,
-  connectedDevices = 1,
   linkedAccount,
   isMpConfigured,
+  needsReauth,
+  allowSimulation,
   onOpenPendingApproval,
-  currentRole,
-  onChangeRole,
-  sellerName,
-  onChangeSellerName,
+  isOwner,
+  userName,
+  businessName,
 }: HeaderProps) {
   const [soundEnabled, setSoundEnabled] = useState(soundNotifier.isSoundEnabled());
-  const [isRoleDropdownOpen, setIsRoleDropdownOpen] = useState(false);
-  const [isEditingName, setIsEditingName] = useState(false);
-  const [tempSellerName, setTempSellerName] = useState(sellerName);
 
   const toggleSound = () => {
     const next = !soundEnabled;
@@ -73,11 +68,6 @@ export function Header({
     if (next) {
       soundNotifier.playSaleAcceptedChime();
     }
-  };
-
-  const handleSaveSellerName = () => {
-    onChangeSellerName(tempSellerName.trim() || 'Vendedor Mostrador');
-    setIsEditingName(false);
   };
 
   return (
@@ -104,11 +94,11 @@ export function Header({
                     isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
                   }`}
                 />
-                {isConnected ? 'Escuchando en Tiempo Real' : 'Conectando servicio...'}
+                {isConnected ? 'En línea' : 'Reconectando...'}
               </span>
               <span>•</span>
               <span className="text-slate-400">
-                {currentRole === 'dueno' ? 'Panel de Dueño / Administrador' : `Caja Mostrador: ${sellerName || 'Vendedor'}`}
+                {businessName}
               </span>
             </div>
           </div>
@@ -116,128 +106,18 @@ export function Header({
 
         {/* Action Controls */}
         <div className="flex items-center flex-wrap gap-2 sm:gap-2.5">
-          {/* User Role Switcher Dropdown */}
-          <div className="relative">
-            <button
-              id="btn-role-switcher"
-              type="button"
-              onClick={() => setIsRoleDropdownOpen(!isRoleDropdownOpen)}
-              className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold border transition shadow-xs cursor-pointer ${
-                currentRole === 'dueno'
-                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/30 hover:bg-amber-500/25'
-                  : 'bg-sky-500/15 text-sky-300 border-sky-500/30 hover:bg-sky-500/25'
-              }`}
-              title="Cambiar entre modo Dueño y modo Vendedor / Caja"
-            >
-              {currentRole === 'dueno' ? (
-                <>
-                  <Crown className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Dueño</span>
-                </>
-              ) : (
-                <>
-                  <Store className="w-3.5 h-3.5 text-sky-400" />
-                  <span className="max-w-[100px] truncate">{sellerName || 'Vendedor'}</span>
-                </>
-              )}
-              <ChevronDown className="w-3 h-3 opacity-70" />
-            </button>
-
-            {isRoleDropdownOpen && (
-              <div
-                className="absolute right-0 mt-2 w-64 rounded-2xl bg-white text-slate-900 shadow-xl border border-slate-200 py-2 z-50 animate-in fade-in zoom-in-95 duration-100"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="px-3 py-1.5 border-b border-slate-100 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                  Cambiar Perfil de Usuario
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    onChangeRole('dueno');
-                    setIsRoleDropdownOpen(false);
-                  }}
-                  className={`w-full px-3.5 py-2.5 text-left text-xs flex items-center justify-between hover:bg-amber-50 transition cursor-pointer ${
-                    currentRole === 'dueno' ? 'font-bold bg-amber-50/70 text-amber-950' : 'text-slate-700'
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <Crown className="w-4 h-4 text-amber-500" />
-                    <div>
-                      <div className="font-bold">Dueño / Administrador</div>
-                      <div className="text-[10px] text-slate-500">Acceso total a reportes y configuración</div>
-                    </div>
-                  </div>
-                  {currentRole === 'dueno' && <span className="w-2 h-2 rounded-full bg-amber-500" />}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    onChangeRole('vendedor');
-                    setIsRoleDropdownOpen(false);
-                  }}
-                  className={`w-full px-3.5 py-2.5 text-left text-xs flex items-center justify-between hover:bg-sky-50 transition cursor-pointer ${
-                    currentRole === 'vendedor' ? 'font-bold bg-sky-50/70 text-sky-950' : 'text-slate-700'
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <Store className="w-4 h-4 text-sky-500" />
-                    <div>
-                      <div className="font-bold">Vendedor / Mostrador</div>
-                      <div className="text-[10px] text-slate-500">Modo caja rápido, claves protegidas</div>
-                    </div>
-                  </div>
-                  {currentRole === 'vendedor' && <span className="w-2 h-2 rounded-full bg-sky-500" />}
-                </button>
-
-                {currentRole === 'vendedor' && (
-                  <div className="mt-1 pt-2 border-t border-slate-100 px-3.5 pb-1">
-                    <div className="text-[11px] font-semibold text-slate-600 mb-1">Nombre en el mostrador:</div>
-                    {isEditingName ? (
-                      <div className="flex gap-1.5">
-                        <input
-                          type="text"
-                          value={tempSellerName}
-                          onChange={(e) => setTempSellerName(e.target.value)}
-                          className="w-full text-xs px-2 py-1 border border-slate-300 rounded-lg focus:outline-none focus:border-sky-500"
-                          placeholder="Tu nombre o caja"
-                          autoFocus
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') handleSaveSellerName();
-                          }}
-                        />
-                        <button
-                          type="button"
-                          onClick={handleSaveSellerName}
-                          className="px-2 py-1 bg-sky-600 text-white rounded-lg text-xs font-bold"
-                        >
-                          Guardar
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-slate-900">{sellerName || 'Vendedor Mostrador'}</span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setTempSellerName(sellerName);
-                            setIsEditingName(true);
-                          }}
-                          className="text-[11px] text-sky-600 hover:underline cursor-pointer font-medium"
-                        >
-                          Editar
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
+          {/* Who is signed in */}
+          <div
+            className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold border ${
+              isOwner ? 'bg-amber-500/15 text-amber-300 border-amber-500/30' : 'bg-sky-500/15 text-sky-300 border-sky-500/30'
+            }`}
+          >
+            {isOwner ? <Crown className="w-3.5 h-3.5 text-amber-400" /> : <Store className="w-3.5 h-3.5 text-sky-400" />}
+            <span className="max-w-[120px] truncate">{userName}</span>
           </div>
 
           {/* Share with Team / Sellers button */}
+          {isOwner && (
           <button
             id="btn-header-share-team"
             type="button"
@@ -249,15 +129,24 @@ export function Header({
             <span className="hidden sm:inline">Compartir con</span>
             <span>Vendedores</span>
           </button>
+          )}
 
           {/* Mercado Pago Link / Account Button */}
-          {linkedAccount || isMpConfigured ? (
+          {needsReauth ? (
+            <button
+              type="button"
+              onClick={onOpenMpLink}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white transition cursor-pointer"
+            >
+              <span>MP desconectado: reconectar</span>
+            </button>
+          ) : isMpConfigured ? (
             <button
               id="btn-header-linked-mercadopago"
               type="button"
               onClick={onOpenMpLink}
               className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold bg-sky-950/80 text-sky-200 border border-[#009ee3]/50 hover:bg-sky-900 active:scale-98 transition shadow-xs cursor-pointer"
-              title={currentRole === 'vendedor' ? 'Mercado Pago activo y configurado por el dueño' : 'Cuenta vinculada - Clic para administrar'}
+              title={isOwner ? 'Cuenta conectada - Clic para administrar' : 'Mercado Pago conectado por el dueño'}
             >
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
               <span className="font-bold text-sky-400">MP:</span>
@@ -276,7 +165,7 @@ export function Header({
               <div className="w-4 h-4 rounded bg-white/20 flex items-center justify-center text-[10px] font-black">
                 MP
               </div>
-              <span>Vincular con Mercado Pago</span>
+              <span>Conectar Mercado Pago</span>
               <ExternalLink className="w-3 h-3 text-sky-100" />
             </button>
           )}
@@ -301,13 +190,10 @@ export function Header({
             type="button"
             onClick={onOpenDeviceSync}
             className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-emerald-950/80 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-900 active:scale-98 transition shadow-xs cursor-pointer"
-            title="Conectar celular y ver en tiempo real en otros dispositivos"
+            title="Abrir en otro dispositivo"
           >
-            <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-            <span className="hidden sm:inline">En Vivo</span>
-            <span className="px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-bold">
-              {connectedDevices}
-            </span>
+            <Radio className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="hidden sm:inline">Otro dispositivo</span>
           </button>
 
           {/* Sound Notification Toggle */}
@@ -339,6 +225,7 @@ export function Header({
           </button>
 
           {/* Simulate Payment Button */}
+          {allowSimulation && isOwner && (
           <button
             id="btn-simulate-payment"
             type="button"
@@ -349,20 +236,18 @@ export function Header({
             <Sparkles className="w-3.5 h-3.5 text-sky-400" />
             <span className="hidden xl:inline">Simular Cobro</span>
           </button>
-
-          {/* Webhook & API Settings (Only shown to Dueño for security) */}
-          {currentRole === 'dueno' && (
-            <button
-              id="btn-open-settings"
-              type="button"
-              onClick={onOpenSettings}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700 transition-colors cursor-pointer"
-              title="Ajustes técnicos del dueño"
-            >
-              <Settings className="w-3.5 h-3.5 text-slate-400" />
-              <span className="hidden md:inline">Ajustes</span>
-            </button>
           )}
+
+          <button
+            id="btn-logout"
+            type="button"
+            onClick={onLogout}
+            title="Cerrar sesión"
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700 transition-colors cursor-pointer"
+          >
+            <LogOut className="w-3.5 h-3.5 text-slate-400" />
+            <span className="hidden md:inline">Salir</span>
+          </button>
         </div>
       </div>
     </header>

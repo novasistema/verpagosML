@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { X, Check, ArrowRight, ShieldCheck, User, CreditCard } from 'lucide-react';
-import { PaymentItem } from '../types';
+import { PaymentItem, hasUnknownPayer } from '../types';
 import { soundNotifier } from '../utils/audio';
 
 interface InstantSaleApprovalModalProps {
@@ -74,7 +74,7 @@ export function InstantSaleApprovalModal({
     }
   };
 
-  const payerDisplay = payment.payer.email || payment.payer.fullName || 'Cliente Mercado Pago';
+  const payerDisplay = payment.payer.email || payment.payer.fullName || 'Titular no informado';
   const paymentTime = getFormattedTime(payment.dateApproved || payment.dateCreated);
 
   return (
@@ -148,6 +148,12 @@ export function InstantSaleApprovalModal({
               {payment.payer.identificationNumber && (
                 <p className="text-[11px] font-mono text-slate-800 mt-0.5 opacity-80">
                   {payment.payer.identificationType || 'DNI'}: {payment.payer.identificationNumber}
+                </p>
+              )}
+
+              {hasUnknownPayer(payment) && (
+                <p id="unknown-payer-note" className="text-xs font-bold text-slate-900 mt-1 max-w-[280px]">
+                  Mercado Pago no informa quién la envió: confirmá por monto y hora.
                 </p>
               )}
 

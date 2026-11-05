@@ -1,4 +1,4 @@
-export type PaymentStatus = 'approved' | 'in_process' | 'rejected' | 'refunded' | 'pending';
+export type PaymentStatus = 'approved' | 'in_process' | 'rejected' | 'refunded' | 'pending' | 'authorized' | 'cancelled' | 'in_mediation' | 'charged_back' | 'other_account';
 
 export type SaleVerificationStatus = 'pending' | 'accepted' | 'rejected';
 
@@ -26,6 +26,8 @@ export interface PaymentItem {
   id: string;
   dateCreated: string;
   dateApproved: string | null;
+  transactionAmountRefunded?: number;
+  operationType?: string;
   status: PaymentStatus;
   statusDetail: string;
   transactionAmount: number;
@@ -50,25 +52,53 @@ export interface LinkedMpAccount {
   email: string;
   firstName?: string;
   lastName?: string;
-  countryId?: string;
-  siteId?: string;
   linkedAt: string;
-  authMethod: 'oauth' | 'token' | 'demo';
+  state: 'active' | 'needs_reauth';
 }
 
-export interface AppServerStatus {
+export interface MpStatus {
   configured: boolean;
-  hasAccessToken: boolean;
+  needsReauth: boolean;
+  oauthReady: boolean;
+  linkedAccount: LinkedMpAccount | null;
+  revision: number;
+}
+
+export interface AppServerStatus extends MpStatus {
   appUrl: string;
-  webhookUrl: string;
-  totalPayments: number;
-  pendingCount: number;
-  acceptedCount: number;
-  todayTotal: number;
-  connectedDevices?: number;
-  mpAccountEmail?: string;
-  linkedAccount?: LinkedMpAccount | null;
-  clientId?: string;
+}
+
+export interface SessionInfo {
+  authenticated: boolean;
+  role?: 'owner' | 'seller';
+  userName?: string;
+  businessName?: string;
+  setupMissing: string[];
+  storage: 'firestore' | 'file' | null;
+  allowSimulation: boolean;
+  registrationRequiresCode: boolean;
+}
+
+/** Waiting for the cashier: only money Mercado Pago already approved. */
+export const MP_STATUS_LABELS: Record<string, string> = {
+  pending: 'pendiente',
+  in_process: 'en revisión',
+  authorized: 'autorizado sin acreditar',
+  rejected: 'rechazado',
+  cancelled: 'cancelado',
+  refunded: 'devuelto',
+  in_mediation: 'en mediación',
+  charged_back: 'con contracargo',
+  other_account: 'de otra cuenta de Mercado Pago',
+};
+
+/** Mercado Pago doesn't say who sent it: the cashier has to check amount and time. */
+export function hasUnknownPayer(payment: PaymentItem): boolean {
+  return payment.source !== 'simulation' && !payment.payer.email && !payment.payer.identificationNumber;
+}
+
+export function needsApproval(payment: PaymentItem): boolean {
+  return payment.status === 'approved' && payment.saleVerification.status === 'pending';
 }
 
 export interface VerifySalePayload {
@@ -78,9 +108,3 @@ export interface VerifySalePayload {
   internalNotes?: string;
 }
 
-export type UserRole = 'dueno' | 'vendedor';
-
-export interface UserProfile {
-  role: UserRole;
-  userName: string;
-}

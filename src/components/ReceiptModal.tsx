@@ -1,5 +1,5 @@
-import { Printer, X, ShieldCheck, CheckCircle2, User, CreditCard, Calendar } from 'lucide-react';
-import { PaymentItem } from '../types';
+import { AlertCircle, Printer, X, ShieldCheck, CheckCircle2, User, CreditCard, Calendar } from 'lucide-react';
+import { MP_STATUS_LABELS, PaymentItem } from '../types';
 
 interface ReceiptModalProps {
   payment: PaymentItem | null;
@@ -35,6 +35,12 @@ export function ReceiptModal({ payment, isOpen, onClose }: ReceiptModalProps) {
   };
 
   const isAccepted = payment.saleVerification.status === 'accepted';
+  const isSimulation = payment.source === 'simulation';
+  // A cashier may hand over goods on this page: it only reads as paid when Mercado Pago says so.
+  const isVerified = payment.status === 'approved' && !isSimulation;
+  const warning = isSimulation
+    ? 'SIMULACIÓN: NO ES DINERO REAL'
+    : `NO ES COMPROBANTE DE COBRO: PAGO ${(MP_STATUS_LABELS[payment.status] || payment.status).toUpperCase()}`;
 
   return (
     <div
@@ -64,23 +70,32 @@ export function ReceiptModal({ payment, isOpen, onClose }: ReceiptModalProps) {
         <div id="printable-voucher" className="p-6 text-slate-800 font-sans">
           {/* Top Logo & Header */}
           <div className="text-center border-b border-dashed border-slate-300 pb-4">
-            <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-emerald-100 text-emerald-600 mb-2">
-              <CheckCircle2 className="w-7 h-7" />
+            <div
+              className={`inline-flex items-center justify-center w-12 h-12 rounded-full mb-2 ${
+                isVerified ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'
+              }`}
+            >
+              {isVerified ? <CheckCircle2 className="w-7 h-7" /> : <AlertCircle className="w-7 h-7" />}
             </div>
             <h2 className="text-lg font-black tracking-tight text-slate-900 uppercase">
-              COMPROBANTE DE VENTA
+              {isVerified ? 'COMPROBANTE DE VENTA' : 'DETALLE DE OPERACIÓN'}
             </h2>
-            <p className="text-xs text-slate-500 mt-0.5 font-medium">
-              Acreditación Verificada en Mercado Pago
-            </p>
-            <div className="mt-2 inline-block px-3 py-1 bg-emerald-50 text-emerald-700 border border-emerald-300 rounded-full text-xs font-bold uppercase tracking-wider">
-              {isAccepted ? 'PAGO ACEPTADO COMO VENTA' : 'COBRO ACREDITADO'}
+            {isVerified && (
+              <p className="text-xs text-slate-500 mt-0.5 font-medium">Acreditación Verificada en Mercado Pago</p>
+            )}
+            <div
+              id="receipt-status"
+              className={`mt-2 inline-block px-3 py-1 border rounded-full text-xs font-bold uppercase tracking-wider ${
+                isVerified ? 'bg-emerald-50 text-emerald-700 border-emerald-300' : 'bg-rose-50 text-rose-800 border-rose-300'
+              }`}
+            >
+              {!isVerified ? warning : isAccepted ? 'PAGO ACEPTADO COMO VENTA' : 'COBRO ACREDITADO'}
             </div>
           </div>
 
           {/* Amount Showcase */}
           <div className="my-5 text-center bg-slate-50 py-3.5 rounded-xl border border-slate-200">
-            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Total Cobrado</div>
+            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">{isVerified ? 'Total Cobrado' : 'Monto'}</div>
             <div className="text-3xl font-black text-slate-950 mt-0.5">
               {formatCurrency(payment.transactionAmount)}
             </div>
@@ -150,7 +165,7 @@ export function ReceiptModal({ payment, isOpen, onClose }: ReceiptModalProps) {
           {/* Footer Notes */}
           <div className="mt-4 text-center">
             <p className="text-[10px] text-slate-600">
-              Corroborado electrónicamente en tiempo real mediante API de Mercado Pago.
+              {isVerified ? 'Corroborado electrónicamente con la API de Mercado Pago.' : warning}
             </p>
           </div>
         </div>

@@ -6,9 +6,9 @@ interface StatsBarProps {
 }
 
 export function StatsBar({ payments }: StatsBarProps) {
-  const today = new Date().toISOString().split('T')[0];
+  const today = new Date().toDateString();
 
-  const todayPayments = payments.filter((p) => p.dateCreated.startsWith(today));
+  const todayPayments = payments.filter((p) => new Date(p.dateCreated).toDateString() === today);
   const todayApproved = todayPayments.filter((p) => p.status === 'approved');
 
   const todayTotalAmount = todayApproved.reduce((sum, p) => sum + p.transactionAmount, 0);
