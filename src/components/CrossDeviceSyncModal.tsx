@@ -15,13 +15,14 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { soundNotifier } from '../utils/audio';
+import { api } from '../api';
 
 interface CrossDeviceSyncModalProps {
   isOpen: boolean;
   onClose: () => void;
   appUrl: string;
   connectedDevices: number;
-  onSimulateTestPayment: () => void;
+  onSimulateTestPayment?: () => void;
 }
 
 export const CrossDeviceSyncModal: React.FC<CrossDeviceSyncModalProps> = ({
@@ -77,11 +78,7 @@ export const CrossDeviceSyncModal: React.FC<CrossDeviceSyncModalProps> = ({
     try {
       setIsSendingPing(true);
       soundNotifier.playPaymentChime();
-      const res = await fetch('/api/devices/ping', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ device: 'Panel de Control' }),
-      });
+      const res = await api('/api/devices/ping', { method: 'POST', body: {} });
       if (res.ok) {
         setPingSuccess(true);
         setTimeout(() => setPingSuccess(false), 3000);
@@ -313,6 +310,7 @@ export const CrossDeviceSyncModal: React.FC<CrossDeviceSyncModalProps> = ({
 
         {/* Footer */}
         <div className="bg-slate-50 px-6 py-4 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-3">
+          {onSimulateTestPayment && (
           <button
             id="btn-simulate-from-modal"
             type="button"
@@ -325,6 +323,7 @@ export const CrossDeviceSyncModal: React.FC<CrossDeviceSyncModalProps> = ({
             <Radio className="w-4 h-4 text-emerald-200" />
             <span>Simular Pago y Probar Notificación en Pantallas</span>
           </button>
+          )}
 
           <button
             id="btn-close-device-modal-footer"

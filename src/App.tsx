@@ -1,96 +1,104 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
-import {
-  Search,
-  Filter,
-  CheckCircle2,
-  Clock,
-  AlertCircle,
-  Sparkles,
-  RefreshCw,
-  SlidersHorizontal,
-  ChevronDown,
-  ShieldCheck,
-  Smartphone,
-  CreditCard,
-  User,
-  Radio,
-  ExternalLink,
-  Store,
-  Crown,
-  Users,
-} from 'lucide-react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { Search, CheckCircle2, Clock, Sparkles, Smartphone, Radio, ExternalLink, AlertCircle } from 'lucide-react';
 import { Header } from './components/Header';
 import { StatsBar } from './components/StatsBar';
 import { PaymentCard } from './components/PaymentCard';
 import { LiveAlertToast } from './components/LiveAlertToast';
 import { AcceptSaleModal } from './components/AcceptSaleModal';
 import { ReceiptModal } from './components/ReceiptModal';
-import { WebhookConfigModal } from './components/WebhookConfigModal';
 import { InstantSaleApprovalModal } from './components/InstantSaleApprovalModal';
 import { CrossDeviceSyncModal } from './components/CrossDeviceSyncModal';
 import { MercadoPagoLinkModal } from './components/MercadoPagoLinkModal';
 import { TeamShareModal } from './components/TeamShareModal';
-import { PaymentItem, AppServerStatus, VerifySalePayload } from './types';
+import { AuthScreen, SetupRequired } from './components/AuthScreen';
+import { PaymentItem, AppServerStatus, MpStatus, SessionInfo, VerifySalePayload, needsApproval } from './types';
 import { soundNotifier } from './utils/audio';
+import { api, ApiError } from './api';
 
+const POLL_INTERVAL_MS = 5000;
+
+const MP_ERRORS: Record<string, string> = {
+  cancelled: 'La autorización en Mercado Pago se canceló.',
+  invalid_state: 'La autorización venció o se abrió en otra sesión. Volvé a intentarlo desde acá.',
+  no_code: 'Mercado Pago no devolvió la autorización. Volvé a intentarlo.',
+  already_linked: 'Esa cuenta de Mercado Pago ya está conectada a otro comercio de este sistema.',
+  exchange_failed: 'Mercado Pago no pudo completar la conexión. Volvé a intentarlo en un momento.',
+};
+
+/** Decides what to show: installation pending, sign-in, or the cash desk. */
 export default function App() {
+  const [session, setSession] = useState<SessionInfo | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [inviteCode] = useState<string | null>(() => new URLSearchParams(window.location.search).get('acceso'));
+
+  const loadSession = useCallback(async () => {
+    try {
+      setSession(await api<SessionInfo>('/api/session'));
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(err instanceof ApiError ? err.message : 'No se pudo cargar la aplicación.');
+    }
+  }, []);
+
+  useEffect(() => {
+    loadSession();
+    window.addEventListener('session-expired', loadSession);
+    return () => window.removeEventListener('session-expired', loadSession);
+  }, [loadSession]);
+
+  // The invite code must not stay visible in the address bar or browser history.
+  useEffect(() => {
+    if (session?.authenticated && inviteCode) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('acceso');
+      window.history.replaceState({}, document.title, url.pathname + url.search);
+    }
+  }, [session, inviteCode]);
+
+  if (loadError && !session) {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center gap-3 p-4 text-center">
+        <p className="text-sm">{loadError}</p>
+        <button type="button" onClick={loadSession} className="px-4 py-2 rounded-xl bg-sky-600 text-sm font-bold cursor-pointer">
+          Reintentar
+        </button>
+      </div>
+    );
+  }
+  if (!session) {
+    return <div className="min-h-screen bg-slate-900" aria-busy="true" />;
+  }
+  if (session.setupMissing.length > 0) {
+    return <SetupRequired missing={session.setupMissing} />;
+  }
+  if (!session.authenticated) {
+    return <AuthScreen session={session} inviteCode={inviteCode} onAuthenticated={loadSession} />;
+  }
+  return <Dashboard session={session} onLogout={loadSession} />;
+}
+
+function Dashboard({ session, onLogout }: { session: SessionInfo; onLogout: () => Promise<void> }) {
+  const isOwner = session.role === 'owner';
+  const userName = session.userName || 'Vendedor';
+  const allowSimulation = session.allowSimulation && isOwner;
+
   const [payments, setPayments] = useState<PaymentItem[]>([]);
   const [serverStatus, setServerStatus] = useState<AppServerStatus | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'accepted' | 'rejected'>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Multi-user company role management (Dueño vs Vendedor)
-  const [currentRole, setCurrentRole] = useState<'dueno' | 'vendedor'>(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      const urlRole = params.get('rol') || params.get('role');
-      if (urlRole === 'vendedor') return 'vendedor';
-      if (urlRole === 'dueno') return 'dueno';
-      const stored = localStorage.getItem('app_user_role');
-      if (stored === 'vendedor' || stored === 'dueno') return stored;
-    }
-    return 'dueno';
-  });
-
-  const [sellerName, setSellerName] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      const urlSeller = params.get('vendedor') || params.get('cajero');
-      if (urlSeller) return decodeURIComponent(urlSeller);
-      const stored = localStorage.getItem('app_seller_name');
-      if (stored) return stored;
-    }
-    return 'Vendedor Mostrador';
-  });
-
-  const handleRoleChange = (role: 'dueno' | 'vendedor') => {
-    setCurrentRole(role);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('app_user_role', role);
-    }
-  };
-
-  const handleSellerNameChange = (name: string) => {
-    setSellerName(name);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('app_seller_name', name);
-    }
-  };
-
   // Modals state
   const [selectedPaymentForAccept, setSelectedPaymentForAccept] = useState<PaymentItem | null>(null);
   const [selectedPaymentForReceipt, setSelectedPaymentForReceipt] = useState<PaymentItem | null>(null);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isDeviceSyncOpen, setIsDeviceSyncOpen] = useState(false);
   const [isMpLinkOpen, setIsMpLinkOpen] = useState(false);
+  const [mpLinkError, setMpLinkError] = useState<string | null>(null);
   const [isTeamShareOpen, setIsTeamShareOpen] = useState(false);
   const [connectedDevicesCount, setConnectedDevicesCount] = useState(1);
-  const [isMobileAudioUnlocked, setIsMobileAudioUnlocked] = useState(false);
 
-  // Instant full-screen phone approval modal (matches the reference photo)
+  // Instant full-screen phone approval modal
   const [instantApprovalPayment, setInstantApprovalPayment] = useState<PaymentItem | null>(null);
-  const [hasAutoPromptedOnLoad, setHasAutoPromptedOnLoad] = useState(false);
 
   // Real-time live toast alert for new incoming payment
   const [newIncomingPayment, setNewIncomingPayment] = useState<PaymentItem | null>(null);
@@ -100,380 +108,214 @@ export default function App() {
   const [isSimulating, setIsSimulating] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
 
-  // Fetch payments from server
+  const showFeedback = useCallback((message: string, ms = 5000) => {
+    setSyncFeedback(message);
+    setTimeout(() => setSyncFeedback(null), ms);
+  }, []);
+
+  const revisionRef = useRef<number | null>(null);
+  const waitingIdsRef = useRef<Set<string> | null>(null);
+
+  const applyMpStatus = useCallback((mp: MpStatus) => {
+    setServerStatus((prev) => (prev ? { ...prev, ...mp } : prev));
+  }, []);
+
+  /** Alerts come from comparing with the server, so every screen gets them even without live events. */
+  const applyPayments = useCallback((items: PaymentItem[]) => {
+    setPayments(items);
+    const waiting = items.filter(needsApproval);
+    const known = waitingIdsRef.current;
+    if (known === null) {
+      if (waiting.length > 0) setInstantApprovalPayment(waiting[0]);
+    } else {
+      const fresh = waiting.filter((p) => !known.has(p.id));
+      if (fresh.length > 0) {
+        soundNotifier.playPaymentChime();
+        setInstantApprovalPayment(fresh[0]);
+        setNewIncomingPayment(fresh[0]);
+      }
+    }
+    waitingIdsRef.current = new Set(waiting.map((p) => p.id));
+    // Another screen resolved it: close it here too.
+    const stillWaiting = waitingIdsRef.current;
+    setInstantApprovalPayment((current) => (current && !stillWaiting.has(current.id) ? null : current));
+    setNewIncomingPayment((current) => (current && !stillWaiting.has(current.id) ? null : current));
+  }, []);
+
   const fetchPayments = useCallback(async () => {
     try {
-      const res = await fetch('/api/payments');
-      if (res.ok) {
-        const ct = res.headers.get('content-type') || '';
-        if (ct.includes('application/json')) {
-          const data = await res.json();
-          const items: PaymentItem[] = data.payments || [];
-          setPayments(items);
-
-          // Auto notification on entry: jump straight to approving pending payment
-          if (!hasAutoPromptedOnLoad && items.length > 0) {
-            const pending = items.find((p) => p.saleVerification.status === 'pending');
-            if (pending) {
-              setInstantApprovalPayment(pending);
-              setHasAutoPromptedOnLoad(true);
-              soundNotifier.playPaymentChime();
-            }
-          }
-        }
-      }
+      const since = revisionRef.current;
+      const data = await api<{ payments?: PaymentItem[]; unchanged?: boolean; status: MpStatus }>(
+        since === null ? '/api/payments' : `/api/payments?since=${since}`,
+      );
+      revisionRef.current = data.status.revision;
+      applyMpStatus(data.status);
+      if (data.payments) applyPayments(data.payments);
+      setIsConnected(true);
     } catch (err) {
-      console.error('Error fetching payments:', err);
+      if (!(err instanceof ApiError) || err.status !== 401) setIsConnected(false);
     }
-  }, [hasAutoPromptedOnLoad]);
+  }, [applyMpStatus, applyPayments]);
 
-  // Fetch status
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api/status');
-      if (res.ok) {
-        const ct = res.headers.get('content-type') || '';
-        if (ct.includes('application/json')) {
-          const data = await res.json();
-          setServerStatus(data);
-        }
-      }
+      const data = await api<AppServerStatus>('/api/status');
+      setServerStatus(data);
+      if (data.connectedDevices) setConnectedDevicesCount(data.connectedDevices);
     } catch (err) {
       console.error('Error fetching status:', err);
     }
   }, []);
 
-  // Initialize and subscribe to SSE
+  const replacePayment = useCallback(
+    (payment: PaymentItem) => {
+      setPayments((prev) => {
+        const next = prev.map((p) => (p.id === payment.id ? payment : p));
+        waitingIdsRef.current = new Set(next.filter(needsApproval).map((p) => p.id));
+        return next;
+      });
+      setNewIncomingPayment((current) => (current?.id === payment.id ? null : current));
+    },
+    [],
+  );
+
+  // Live events are only a shortcut: polling works even if they fail or the server has several instances.
   useEffect(() => {
-    fetchPayments();
-    fetchStatus();
+    fetchStatus().then(fetchPayments);
 
-    // Setup Server-Sent Events
-    let eventSource: EventSource | null = null;
-
-    try {
-      eventSource = new EventSource('/api/events');
-
-      eventSource.onopen = () => {
-        setIsConnected(true);
-      };
-
-      eventSource.addEventListener('init:sync', (e: MessageEvent) => {
-        try {
-          const data = JSON.parse(e.data);
-          if (typeof data.connectedDevices === 'number') {
-            setConnectedDevicesCount(data.connectedDevices);
-          }
-        } catch {
-          // ignore
-        }
-      });
-
-      eventSource.addEventListener('devices:count', (e: MessageEvent) => {
-        try {
-          const data = JSON.parse(e.data);
-          if (typeof data.connectedDevices === 'number') {
-            setConnectedDevicesCount(data.connectedDevices);
-          }
-        } catch {
-          // ignore
-        }
-      });
-
-      eventSource.addEventListener('devices:ping', () => {
-        soundNotifier.playPaymentChime();
-      });
-
-      eventSource.addEventListener('payment:created', (e: MessageEvent) => {
-        try {
-          const item: PaymentItem = JSON.parse(e.data);
-          setPayments((prev) => {
-            const exists = prev.some((p) => p.id === item.id);
-            if (exists) return prev;
-            return [item, ...prev];
-          });
-
-          // Play audio notification chime
-          soundNotifier.playPaymentChime();
-
-          // Immediately pop up the notification on screen to approve it (on all synced screens!)
-          if (item.saleVerification?.status === 'pending') {
-            setInstantApprovalPayment(item);
-          }
-
-          // Trigger live toast alert
-          setNewIncomingPayment(item);
-
-          fetchStatus();
-        } catch (err) {
-          console.error('Failed to parse SSE payment:created', err);
-        }
-      });
-
-      eventSource.addEventListener('payment:updated', (e: MessageEvent) => {
-        try {
-          const item: PaymentItem = JSON.parse(e.data);
-          setPayments((prev) =>
-            prev.map((p) => (p.id === item.id ? { ...p, ...item } : p)),
-          );
-          fetchStatus();
-        } catch (err) {
-          console.error('Failed to parse SSE payment:updated', err);
-        }
-      });
-
-      eventSource.addEventListener('payment:verified', (e: MessageEvent) => {
-        try {
-          const item: PaymentItem = JSON.parse(e.data);
-          setPayments((prev) =>
-            prev.map((p) => (p.id === item.id ? { ...p, ...item } : p)),
-          );
-
-          // If another device verified this sale, close the approval prompt automatically
-          setInstantApprovalPayment((current) => {
-            if (current && current.id === item.id) {
-              return null;
-            }
-            return current;
-          });
-
-          soundNotifier.playSaleAcceptedChime();
-          fetchStatus();
-        } catch (err) {
-          console.error('Failed to parse SSE payment:verified', err);
-        }
-      });
-
-      eventSource.addEventListener('account:linked', () => {
-        fetchStatus();
-        fetchPayments();
-        soundNotifier.playSaleAcceptedChime();
-        setSyncFeedback('¡Cuenta de Mercado Pago vinculada exitosamente!');
-        setTimeout(() => setSyncFeedback(null), 5000);
-      });
-
-      eventSource.addEventListener('account:unlinked', () => {
-        fetchStatus();
-        setSyncFeedback('Cuenta de Mercado Pago desvinculada.');
-        setTimeout(() => setSyncFeedback(null), 4000);
-      });
-
-      eventSource.onerror = () => {
-        setIsConnected(false);
-      };
-    } catch (err) {
-      console.error('SSE initialization error:', err);
-      setIsConnected(false);
-    }
-
-    // Mobile background/lock resume handler: Re-sync immediately when phone screen turns back on
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        fetchPayments();
-        fetchStatus();
+    const eventSource = new EventSource('/api/events');
+    eventSource.onopen = () => setIsConnected(true);
+    eventSource.addEventListener('devices:count', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (typeof data.connectedDevices === 'number') setConnectedDevicesCount(data.connectedDevices);
+      } catch {
+        // ignore
       }
+    });
+    eventSource.addEventListener('devices:ping', () => soundNotifier.playPaymentChime());
+    eventSource.addEventListener('payments:changed', () => fetchPayments());
+    eventSource.addEventListener('account:changed', () => fetchStatus());
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') fetchPayments();
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    // Resilient periodic sync for mobile networks and battery-saving modes
-    const backupInterval = setInterval(() => {
-      fetchPayments();
-    }, 4000);
+    const poll = setInterval(fetchPayments, POLL_INTERVAL_MS);
 
     return () => {
-      if (eventSource) {
-        eventSource.close();
-      }
+      eventSource.close();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
-      clearInterval(backupInterval);
+      clearInterval(poll);
     };
   }, [fetchPayments, fetchStatus]);
 
-  // Handle return from OAuth redirect (?mp_linked=true)
+  // Back from Mercado Pago's authorization
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      if (params.get('mp_linked') === 'true') {
-        soundNotifier.playSaleAcceptedChime();
-        setSyncFeedback('¡Cuenta de Mercado Pago vinculada exitosamente!');
-        setTimeout(() => setSyncFeedback(null), 5000);
-        window.history.replaceState({}, document.title, window.location.pathname);
-        fetchStatus();
-        fetchPayments();
-      }
+    const params = new URLSearchParams(window.location.search);
+    const linked = params.get('mp_linked') === 'true';
+    const failure = params.get('mp_error');
+    if (!linked && !failure) return;
+    if (linked) {
+      soundNotifier.playSaleAcceptedChime();
+      showFeedback('¡Cuenta de Mercado Pago conectada!');
+      fetchStatus();
+    } else if (failure) {
+      setMpLinkError(MP_ERRORS[failure] || 'No se pudo conectar Mercado Pago.');
+      setIsMpLinkOpen(true);
     }
-  }, [fetchStatus, fetchPayments]);
+    window.history.replaceState({}, document.title, window.location.pathname);
+  }, [fetchStatus, showFeedback]);
+
+  const handleLogout = async () => {
+    try {
+      await api('/api/auth/logout', { method: 'POST', body: {} });
+    } finally {
+      await onLogout();
+    }
+  };
 
   // Handler: Simulate Incoming Payment
   const handleSimulatePayment = async () => {
     try {
       setIsSimulating(true);
-      const res = await fetch('/api/payments/simulate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        // The SSE will also broadcast, but optimistic update is instant
-        setPayments((prev) => {
-          if (prev.some((p) => p.id === data.payment.id)) return prev;
-          return [data.payment, ...prev];
-        });
-        soundNotifier.playPaymentChime();
-        setInstantApprovalPayment(data.payment);
-        setNewIncomingPayment(data.payment);
-        fetchStatus();
-      }
+      await api('/api/payments/simulate', { method: 'POST', body: {} });
+      await fetchPayments();
     } catch (err) {
-      console.error('Simulation error:', err);
+      showFeedback(err instanceof ApiError ? err.message : 'No se pudo simular el pago.');
     } finally {
       setIsSimulating(false);
     }
   };
 
+  /** A refused decision (for example, another cashier got there first) must be seen. */
+  const decideSale = async (paymentId: string, body: Record<string, unknown>): Promise<PaymentItem | null> => {
+    try {
+      const data = await api<{ payment: PaymentItem }>(`/api/payments/${paymentId}/verify-sale`, {
+        method: 'POST',
+        body,
+      });
+      replacePayment(data.payment);
+      return data.payment;
+    } catch (err) {
+      showFeedback(err instanceof ApiError ? err.message : 'No se pudo guardar la decisión.', 7000);
+      const current = err instanceof ApiError ? err.data?.payment : null;
+      if (current) replacePayment(current);
+      setInstantApprovalPayment(null);
+      return null;
+    }
+  };
+
   // Handler: Confirm sale directly from instant phone notification
   const handleConfirmInstantSale = async (payment: PaymentItem) => {
-    try {
-      const generatedTicket = `TK-${Date.now().toString().slice(-6)}`;
-      const operator = currentRole === 'vendedor' ? (sellerName || 'Vendedor Mostrador') : 'Dueño / Admin';
-      const res = await fetch(`/api/payments/${payment.id}/verify-sale`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          status: 'accepted',
-          saleTicketNumber: generatedTicket,
-          productOrConcept: payment.description || 'Cobro por Mostrador / Transferencia',
-          acceptedBy: operator,
-          internalNotes: 'Confirmado desde la pantalla de cobro rápido',
-        }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        setPayments((prev) =>
-          prev.map((p) => (p.id === data.payment.id ? data.payment : p)),
-        );
-        fetchStatus();
-      }
-    } catch (err) {
-      console.error('Error in handleConfirmInstantSale:', err);
-    }
+    await decideSale(payment.id, {
+      status: 'accepted',
+      saleTicketNumber: `TK-${Date.now().toString().slice(-6)}`,
+      productOrConcept: payment.description || 'Cobro por Mostrador / Transferencia',
+      internalNotes: 'Confirmado desde la pantalla de cobro rápido',
+    });
   };
 
   // Handler: Reject sale from instant phone notification ("No es mi venta")
   const handleRejectInstantSale = async (payment: PaymentItem) => {
-    try {
-      const operator = currentRole === 'vendedor' ? (sellerName || 'Vendedor Mostrador') : 'Dueño / Admin';
-      const res = await fetch(`/api/payments/${payment.id}/verify-sale`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          status: 'rejected',
-          acceptedBy: operator,
-          internalNotes: 'No es mi venta - Descartado desde la pantalla de notificación',
-        }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        setPayments((prev) =>
-          prev.map((p) => (p.id === data.payment.id ? data.payment : p)),
-        );
-        fetchStatus();
-      }
-    } catch (err) {
-      console.error('Error in handleRejectInstantSale:', err);
-    }
+    await decideSale(payment.id, {
+      status: 'rejected',
+      internalNotes: 'No es mi venta - Descartado desde la pantalla de notificación',
+    });
   };
 
-  // Handler: Sync with official Mercado Pago API
+  // Handler: Read payments directly from Mercado Pago
   const handleSyncMercadoPago = async () => {
     try {
       setIsSyncing(true);
-      setSyncFeedback(null);
-      const res = await fetch('/api/mercadopago/sync', {
-        method: 'POST',
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setSyncFeedback(`Sincronización exitosa: ${data.count} nuevos pagos incorporados.`);
-        fetchPayments();
-        fetchStatus();
-      } else {
-        setSyncFeedback(data.error || 'Configure el Access Token en el menú de Webhooks.');
-      }
+      const data = await api<{ count: number }>('/api/mercadopago/sync', { method: 'POST', body: {} });
+      showFeedback(data.count > 0 ? `Listo: ${data.count} pagos nuevos.` : 'Listo: no hay pagos nuevos.');
+      await fetchPayments();
     } catch (err) {
-      setSyncFeedback('Error al conectar con la API de Mercado Pago.');
+      showFeedback(err instanceof ApiError ? err.message : 'No se pudo consultar Mercado Pago.');
     } finally {
       setIsSyncing(false);
-      setTimeout(() => setSyncFeedback(null), 5000);
     }
   };
 
   // Handler: Accept Payment as Sale
   const handleConfirmAcceptSale = async (payload: VerifySalePayload) => {
     if (!selectedPaymentForAccept) return;
-    try {
-      const res = await fetch(`/api/payments/${selectedPaymentForAccept.id}/verify-sale`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          status: 'accepted',
-          saleTicketNumber: payload.saleTicketNumber,
-          productOrConcept: payload.productOrConcept,
-          acceptedBy: payload.acceptedBy,
-          internalNotes: payload.internalNotes,
-        }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        setPayments((prev) =>
-          prev.map((p) => (p.id === data.payment.id ? data.payment : p)),
-        );
-        soundNotifier.playSaleAcceptedChime();
-        fetchStatus();
-        // Also open receipt modal for immediate printing
-        setSelectedPaymentForReceipt(data.payment);
-      }
-    } catch (err) {
-      console.error('Error confirming sale:', err);
+    const payment = await decideSale(selectedPaymentForAccept.id, {
+      status: 'accepted',
+      saleTicketNumber: payload.saleTicketNumber,
+      productOrConcept: payload.productOrConcept,
+      internalNotes: payload.internalNotes,
+    });
+    if (payment) {
+      soundNotifier.playSaleAcceptedChime();
+      setSelectedPaymentForReceipt(payment);
     }
   };
 
   // Handler: Reject / Discard Payment
   const handleRejectSale = async (payment: PaymentItem) => {
-    try {
-      const res = await fetch(`/api/payments/${payment.id}/verify-sale`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          status: 'rejected',
-          acceptedBy: 'Cajero',
-          internalNotes: 'Descartado como venta comercial',
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setPayments((prev) =>
-          prev.map((p) => (p.id === data.payment.id ? data.payment : p)),
-        );
-        fetchStatus();
-      }
-    } catch (err) {
-      console.error('Error rejecting sale:', err);
-    }
-  };
-
-  // Handler: Save Access Token
-  const handleSaveToken = async (token: string) => {
-    await fetch('/api/config/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accessToken: token }),
-    });
-    await fetchStatus();
+    await decideSale(payment.id, { status: 'rejected', internalNotes: 'Descartado como venta comercial' });
   };
 
   // Filtered Payments List
@@ -482,7 +324,7 @@ export default function App() {
 
     // Filter by tab
     if (activeTab === 'pending') {
-      list = list.filter((p) => p.saleVerification.status === 'pending');
+      list = list.filter(needsApproval);
     } else if (activeTab === 'accepted') {
       list = list.filter((p) => p.saleVerification.status === 'accepted');
     } else if (activeTab === 'rejected') {
@@ -507,7 +349,7 @@ export default function App() {
     return list;
   }, [payments, activeTab, searchQuery]);
 
-  const pendingCount = payments.filter((p) => p.saleVerification.status === 'pending').length;
+  const pendingCount = payments.filter(needsApproval).length;
   const acceptedCount = payments.filter((p) => p.saleVerification.status === 'accepted').length;
 
   return (
@@ -517,10 +359,10 @@ export default function App() {
         isConnected={isConnected}
         onSimulate={handleSimulatePayment}
         onSync={handleSyncMercadoPago}
-        onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenDeviceSync={() => setIsDeviceSyncOpen(true)}
         onOpenTeamShare={() => setIsTeamShareOpen(true)}
         onOpenMpLink={() => setIsMpLinkOpen(true)}
+        onLogout={handleLogout}
         isSyncing={isSyncing}
         isSimulating={isSimulating}
         hasPending={pendingCount > 0}
@@ -528,14 +370,15 @@ export default function App() {
         connectedDevices={connectedDevicesCount}
         linkedAccount={serverStatus?.linkedAccount}
         isMpConfigured={serverStatus?.configured}
+        needsReauth={serverStatus?.needsReauth}
+        allowSimulation={allowSimulation}
         onOpenPendingApproval={() => {
-          const pending = payments.find((p) => p.saleVerification.status === 'pending');
+          const pending = payments.find(needsApproval);
           if (pending) setInstantApprovalPayment(pending);
         }}
-        currentRole={currentRole}
-        onChangeRole={handleRoleChange}
-        sellerName={sellerName}
-        onChangeSellerName={handleSellerNameChange}
+        isOwner={isOwner}
+        userName={userName}
+        businessName={session.businessName || ''}
       />
 
       {/* Sync feedback banner */}
@@ -547,81 +390,41 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6 flex-1">
-        {/* Seller Info Banner if active in seller mode */}
-        {currentRole === 'vendedor' && (
-          <div className="mb-5 bg-sky-50 border border-sky-200 rounded-2xl p-3.5 sm:p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-sky-600 text-white flex items-center justify-center shrink-0 shadow-xs">
-                <Store className="w-5 h-5" />
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-sky-950 uppercase tracking-wider">
-                    Modo Vendedor Activo
-                  </span>
-                  <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-sky-200 text-sky-900">
-                    {sellerName}
-                  </span>
-                </div>
-                <p className="text-xs text-sky-800 mt-0.5">
-                  Conectado a la cuenta central de Mercado Pago. Puedes verificar transferencias en el mostrador sin necesidad de contraseñas.
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setIsTeamShareOpen(true)}
-                className="text-xs font-bold text-sky-700 hover:text-sky-900 px-3 py-1.5 rounded-xl bg-white border border-sky-200 shadow-xs hover:bg-sky-50 transition flex items-center gap-1.5 cursor-pointer"
-              >
-                <Users className="w-3.5 h-3.5" />
-                <span>Invitar otro Vendedor</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleRoleChange('dueno')}
-                className="text-xs text-slate-600 hover:text-slate-900 font-semibold px-2.5 py-1.5 rounded-xl hover:bg-sky-100/60 transition cursor-pointer"
-              >
-                Cambiar a Dueño
-              </button>
-            </div>
-          </div>
-        )}
-
         {/* Statistics Bar */}
         <StatsBar payments={payments} />
 
-        {/* Mercado Pago Link Banner (if not yet linked) */}
-        {!serverStatus?.configured && (
-          <div className="mb-6 bg-gradient-to-r from-sky-50 via-blue-50 to-indigo-50 border-2 border-[#009ee3]/40 rounded-2xl p-4 sm:p-5 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div className="flex items-start sm:items-center gap-3.5">
-              <div className="w-11 h-11 rounded-2xl bg-[#009ee3] text-white font-black text-base flex items-center justify-center shrink-0 shadow-md">
-                MP
-              </div>
+        {/* Mercado Pago connection banner: says the truth about whether payments can arrive */}
+        {serverStatus && !serverStatus.configured && (
+          <div
+            id="mp-connection-banner"
+            className={`mb-6 border-2 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
+              serverStatus.needsReauth ? 'bg-rose-50 border-rose-300' : 'bg-sky-50 border-[#009ee3]/40'
+            }`}
+          >
+            <div className="flex items-start gap-3">
+              <AlertCircle className={`w-6 h-6 shrink-0 ${serverStatus.needsReauth ? 'text-rose-600' : 'text-[#009ee3]'}`} />
               <div>
-                <div className="flex items-center gap-2">
-                  <h3 className="text-sm font-bold text-slate-900">
-                    Vincular con tu cuenta de Mercado Pago
-                  </h3>
-                  <span className="px-2 py-0.5 rounded-full bg-sky-200 text-sky-900 font-bold text-[10px]">
-                    Requerido para cobros reales
-                  </span>
-                </div>
+                <h3 className="text-sm font-bold text-slate-900">
+                  {serverStatus.needsReauth ? 'Mercado Pago se desconectó' : 'Falta conectar Mercado Pago'}
+                </h3>
                 <p className="text-xs text-slate-600 mt-0.5 max-w-2xl">
-                  Abre tu Mercado Pago y autoriza la vinculación con 1 solo clic para corroborar transferencias bancarias, alias, CVU y cobros con QR en tiempo real en tu pantalla de caja.
+                  {isOwner
+                    ? 'Hasta que la conectes no entran pagos a esta pantalla. Es un solo paso: autorizás desde tu cuenta de Mercado Pago.'
+                    : 'Hasta que el dueño la conecte no entran pagos a esta pantalla. No confirmes ventas desde acá todavía.'}
                 </p>
               </div>
             </div>
-
-            <button
-              id="btn-open-mp-link-prompt"
-              type="button"
-              onClick={() => setIsMpLinkOpen(true)}
-              className="px-4.5 py-2.5 rounded-xl bg-[#009ee3] hover:bg-[#008bd4] text-white font-bold text-xs shadow-md hover:shadow-lg transition flex items-center justify-center gap-2 shrink-0 cursor-pointer active:scale-98"
-            >
-              <span>Abrir Mercado Pago y Vincular</span>
-              <ExternalLink className="w-4 h-4 text-sky-100" />
-            </button>
+            {isOwner && (
+              <button
+                id="btn-open-mp-link-prompt"
+                type="button"
+                onClick={() => setIsMpLinkOpen(true)}
+                className="px-4 py-2.5 rounded-xl bg-[#009ee3] hover:bg-[#008bd4] text-white font-bold text-xs transition flex items-center justify-center gap-2 shrink-0 cursor-pointer"
+              >
+                <span>{serverStatus.needsReauth ? 'Volver a conectar' : 'Conectar Mercado Pago'}</span>
+                <ExternalLink className="w-4 h-4 text-sky-100" />
+              </button>
+            )}
           </div>
         )}
 
@@ -651,7 +454,7 @@ export default function App() {
               id="btn-open-instant-phone-banner"
               type="button"
               onClick={() => {
-                const pending = payments.find((p) => p.saleVerification.status === 'pending');
+                const pending = payments.find(needsApproval);
                 if (pending) setInstantApprovalPayment(pending);
               }}
               className="px-4 py-2.5 rounded-xl bg-[#14532d] hover:bg-[#0f4023] text-white font-bold text-xs shadow-sm transition flex items-center justify-center gap-2 shrink-0 cursor-pointer active:scale-98"
@@ -662,66 +465,48 @@ export default function App() {
           </div>
         )}
 
-        {/* Action / Webhook Ready Alert Bar */}
-        <div className="mb-6 bg-gradient-to-r from-slate-900 via-sky-950 to-slate-900 text-white rounded-2xl p-4 sm:p-5 shadow-sm border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="flex items-start sm:items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-sky-500/20 text-sky-400 border border-sky-500/30 flex items-center justify-center shrink-0">
-              <Radio className="w-5 h-5 animate-pulse" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white">Receptor de Pagos en Vivo Activo</h2>
-                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                  Listo para Cobrar
-                </span>
+        {/* Live receiver bar: only claims to be ready when a real account is connected */}
+        {serverStatus?.configured && (
+          <div className="mb-6 bg-gradient-to-r from-slate-900 via-sky-950 to-slate-900 text-white rounded-2xl p-4 sm:p-5 shadow-sm border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-start sm:items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-sky-500/20 text-sky-400 border border-sky-500/30 flex items-center justify-center shrink-0">
+                <Radio className="w-5 h-5" />
               </div>
-              <p className="text-xs text-slate-300 mt-0.5">
-                Cada vez que un cliente abone por Mercado Pago (QR, Tarjeta, Transferencia), aparecerá aquí instantáneamente con alerta sonora para que corrobore y acepte la venta.
-              </p>
+              <div>
+                <h2 className="text-sm font-bold text-white">Recibiendo cobros de {serverStatus.linkedAccount?.nickname}</h2>
+                <p className="text-xs text-slate-300 mt-0.5">
+                  Cada cobro aprobado aparece acá con alerta sonora para que lo confirmes. Los datos se verifican directamente con Mercado Pago.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center flex-wrap gap-2 shrink-0">
+              <button
+                id="btn-banner-device-sync"
+                type="button"
+                onClick={() => setIsDeviceSyncOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition cursor-pointer"
+              >
+                <Smartphone className="w-3.5 h-3.5 text-emerald-200" />
+                <span>Ver en Celular (QR)</span>
+              </button>
             </div>
           </div>
+        )}
 
-          <div className="flex items-center flex-wrap gap-2 shrink-0">
-            <button
-              id="btn-banner-link-mp"
-              type="button"
-              onClick={() => setIsMpLinkOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#009ee3] hover:bg-[#008bd4] text-white font-bold text-xs transition shadow-xs cursor-pointer active:scale-98"
-            >
-              <div className="w-4 h-4 rounded bg-white/20 flex items-center justify-center text-[10px] font-black">
-                MP
-              </div>
-              <span>{serverStatus?.linkedAccount ? 'Cuenta MP' : 'Vincular Mercado Pago'}</span>
-            </button>
-            <button
-              id="btn-banner-device-sync"
-              type="button"
-              onClick={() => setIsDeviceSyncOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition shadow-xs cursor-pointer active:scale-98"
-            >
-              <Smartphone className="w-3.5 h-3.5 text-emerald-200" />
-              <span>Ver en Celular (QR)</span>
-            </button>
+        {allowSimulation && (
+          <div className="mb-6">
             <button
               id="btn-quick-simulate"
               type="button"
               onClick={handleSimulatePayment}
               disabled={isSimulating}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs transition shadow-sm cursor-pointer active:scale-98"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-100 hover:bg-sky-200 text-sky-900 font-bold text-xs transition cursor-pointer"
             >
               <Sparkles className="w-3.5 h-3.5" />
-              <span>{isSimulating ? 'Generando...' : 'Probar Alerta de Pago'}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setIsSettingsOpen(true)}
-              className="inline-flex items-center gap-1 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium border border-slate-700 transition cursor-pointer"
-            >
-              <span>Ver Webhook URL</span>
-              <ExternalLink className="w-3 h-3 text-slate-400" />
+              <span>{isSimulating ? 'Generando...' : 'Probar alerta con un pago simulado'}</span>
             </button>
           </div>
-        </div>
+        )}
 
         {/* Tabs & Search Controls */}
         <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs p-3.5 sm:p-4 mb-6">
@@ -839,18 +624,10 @@ export default function App() {
             <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
               {searchQuery
                 ? 'No se encontraron operaciones con ese criterio de búsqueda.'
-                : 'Cuando ingrese un pago a través del Webhook de Mercado Pago, aparecerá automáticamente aquí con alerta sonora.'}
+                : serverStatus?.configured
+                  ? 'Cuando entre un cobro va a aparecer acá con alerta sonora.'
+                  : 'Los cobros aparecen cuando la cuenta de Mercado Pago está conectada.'}
             </p>
-            <div className="mt-4 flex items-center justify-center gap-2">
-              <button
-                type="button"
-                onClick={handleSimulatePayment}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs transition"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>Simular Pago Ahora</span>
-              </button>
-            </div>
           </div>
         )}
       </main>
@@ -858,7 +635,7 @@ export default function App() {
       {/* Footer */}
       <footer className="border-t border-slate-200 bg-white py-4 px-4 sm:px-6 text-center text-xs text-slate-500">
         <p>
-          Sistema de Corroboración de Pagos • Integrado con Mercado Pago Webhooks & API en tiempo real
+          Sistema de Corroboración de Pagos
         </p>
       </footer>
 
@@ -878,7 +655,7 @@ export default function App() {
         isOpen={Boolean(selectedPaymentForAccept)}
         onClose={() => setSelectedPaymentForAccept(null)}
         onConfirm={handleConfirmAcceptSale}
-        defaultAcceptedBy={currentRole === 'vendedor' ? (sellerName || 'Vendedor Mostrador') : 'Caja Central'}
+        defaultAcceptedBy={userName}
       />
 
       {/* Modal: Comprobante / Voucher Imprimible */}
@@ -888,16 +665,6 @@ export default function App() {
         onClose={() => setSelectedPaymentForReceipt(null)}
       />
 
-      {/* Modal: Configuración de Webhook & Credenciales */}
-      <WebhookConfigModal
-        status={serverStatus}
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        onSaveToken={handleSaveToken}
-        onTestWebhook={handleSimulatePayment}
-        onOpenMpLink={() => setIsMpLinkOpen(true)}
-      />
-
       {/* Modal: Aprobación Instantánea Tipo Celular (Notificación de cobro requerida) */}
       <InstantSaleApprovalModal
         payment={instantApprovalPayment}
@@ -905,21 +672,11 @@ export default function App() {
         onClose={() => setInstantApprovalPayment(null)}
         onConfirmSale={handleConfirmInstantSale}
         onRejectSale={handleRejectInstantSale}
-        operatorName={currentRole === 'vendedor' ? (sellerName || 'Vendedor Mostrador') : 'Dueño / Admin'}
+        operatorName={userName}
       />
 
-      {/* Modal: Compartir con el Equipo (Dueño & Vendedores) */}
-      <TeamShareModal
-        isOpen={isTeamShareOpen}
-        onClose={() => setIsTeamShareOpen(false)}
-        appUrl={serverStatus?.appUrl || ''}
-        connectedDevices={connectedDevicesCount}
-        onSimulateTestPayment={handleSimulatePayment}
-        currentRole={currentRole}
-        onChangeRole={handleRoleChange}
-        sellerName={sellerName}
-        onChangeSellerName={handleSellerNameChange}
-      />
+      {/* Modal: Invitar vendedores */}
+      {isOwner && <TeamShareModal isOpen={isTeamShareOpen} onClose={() => setIsTeamShareOpen(false)} />}
 
       {/* Modal: Sincronización Multi-Dispositivo & QR para Celulares */}
       <CrossDeviceSyncModal
@@ -927,14 +684,19 @@ export default function App() {
         onClose={() => setIsDeviceSyncOpen(false)}
         appUrl={serverStatus?.appUrl || ''}
         connectedDevices={connectedDevicesCount}
-        onSimulateTestPayment={handleSimulatePayment}
+        onSimulateTestPayment={allowSimulation ? handleSimulatePayment : undefined}
       />
 
-      {/* Modal: Vincular con Mercado Pago (OAuth y Credenciales) */}
+      {/* Modal: Cuenta de Mercado Pago */}
       <MercadoPagoLinkModal
         isOpen={isMpLinkOpen}
-        onClose={() => setIsMpLinkOpen(false)}
+        onClose={() => {
+          setIsMpLinkOpen(false);
+          setMpLinkError(null);
+        }}
         status={serverStatus}
+        isOwner={isOwner}
+        initialError={mpLinkError}
         onRefreshStatus={fetchStatus}
         onSyncPayments={handleSyncMercadoPago}
       />

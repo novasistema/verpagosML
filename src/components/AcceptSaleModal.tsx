@@ -173,8 +173,8 @@ export function AcceptSaleModal({
                   id="input-accepted-by"
                   type="text"
                   value={acceptedBy}
-                  onChange={(e) => setAcceptedBy(e.target.value)}
-                  placeholder="Ej: Caja 1 - Lucas"
+                  readOnly
+                  title="Se registra con el usuario que inició sesión"
                   className="w-full pl-9 pr-3 py-2 text-sm rounded-xl border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 text-slate-800"
                 />
               </div>

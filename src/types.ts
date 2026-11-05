@@ -1,4 +1,4 @@
-export type PaymentStatus = 'approved' | 'in_process' | 'rejected' | 'refunded' | 'pending';
+export type PaymentStatus = 'approved' | 'in_process' | 'rejected' | 'refunded' | 'pending' | 'authorized' | 'cancelled' | 'in_mediation' | 'charged_back';
 
 export type SaleVerificationStatus = 'pending' | 'accepted' | 'rejected';
 
@@ -50,25 +50,37 @@ export interface LinkedMpAccount {
   email: string;
   firstName?: string;
   lastName?: string;
-  countryId?: string;
-  siteId?: string;
   linkedAt: string;
-  authMethod: 'oauth' | 'token' | 'demo';
+  state: 'active' | 'needs_reauth';
 }
 
-export interface AppServerStatus {
+export interface MpStatus {
   configured: boolean;
-  hasAccessToken: boolean;
+  needsReauth: boolean;
+  oauthReady: boolean;
+  linkedAccount: LinkedMpAccount | null;
+  revision: number;
+}
+
+export interface AppServerStatus extends MpStatus {
   appUrl: string;
-  webhookUrl: string;
-  totalPayments: number;
-  pendingCount: number;
-  acceptedCount: number;
-  todayTotal: number;
   connectedDevices?: number;
-  mpAccountEmail?: string;
-  linkedAccount?: LinkedMpAccount | null;
-  clientId?: string;
+}
+
+export interface SessionInfo {
+  authenticated: boolean;
+  role?: 'owner' | 'seller';
+  userName?: string;
+  businessName?: string;
+  setupMissing: string[];
+  storage: 'firestore' | 'file' | null;
+  allowSimulation: boolean;
+  registrationRequiresCode: boolean;
+}
+
+/** Waiting for the cashier: only money Mercado Pago already approved. */
+export function needsApproval(payment: PaymentItem): boolean {
+  return payment.status === 'approved' && payment.saleVerification.status === 'pending';
 }
 
 export interface VerifySalePayload {
@@ -78,9 +90,3 @@ export interface VerifySalePayload {
   internalNotes?: string;
 }
 
-export type UserRole = 'dueno' | 'vendedor';
-
-export interface UserProfile {
-  role: UserRole;
-  userName: string;
-}
