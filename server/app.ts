@@ -1,10 +1,10 @@
 import crypto from 'crypto';
 import express, { NextFunction, Request, Response } from 'express';
-import type { AppConfig } from './config';
-import { MP_SEARCH_PAGE, MercadoPagoClient, MpError, MpRawPayment, isCollectedBy, mapPayment } from './mercadopago';
-import { Keyring, hashPassword, randomToken, verifyPassword, verifyWebhookSignature } from './security';
-import { EmailTakenError, Store } from './store';
-import type { Merchant, PaymentRecord, Role, SessionData } from './types';
+import type { AppConfig } from './config.js';
+import { MP_SEARCH_PAGE, MercadoPagoClient, MpError, MpRawPayment, isCollectedBy, mapPayment } from './mercadopago.js';
+import { Keyring, hashPassword, randomToken, verifyPassword, verifyWebhookSignature } from './security.js';
+import { EmailTakenError, Store } from './store.js';
+import type { Merchant, PaymentRecord, Role, SessionData } from './types.js';
 
 const SESSION_COOKIE = 'cp_session';
 const OAUTH_COOKIE = 'cp_oauth';
@@ -158,22 +158,6 @@ export function createApp(config: AppConfig, store: Store) {
   }
 
   // -------------------------------------------------------------------------
-  // Live updates to this merchant's open screens only
-  // -------------------------------------------------------------------------
-  const channels = new Map<string, Set<Response>>();
-
-  function broadcast(merchantId: string, event: string, data: unknown) {
-    const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    for (const client of channels.get(merchantId) || []) {
-      try {
-        client.write(message);
-      } catch {
-        channels.get(merchantId)?.delete(client);
-      }
-    }
-  }
-
-  // -------------------------------------------------------------------------
   // Mercado Pago tokens and payments
   // -------------------------------------------------------------------------
   const refreshes = new Map<string, Promise<Merchant>>();
@@ -197,7 +181,6 @@ export function createApp(config: AppConfig, store: Store) {
           expiresAt: new Date(Date.now() + tokens.expires_in * 1000).toISOString(),
         };
         if (await store.updateMpIfUnchanged(merchant.id, conn.refreshTokenEnc, updated)) {
-          if (conn.state !== 'active') broadcast(merchant.id, 'account:changed', {});
           return { ...merchant, mp: updated };
         }
         const fresh = await store.getMerchant(merchant.id);
@@ -213,7 +196,6 @@ export function createApp(config: AppConfig, store: Store) {
         const fresh = await store.getMerchant(merchant.id);
         if (fresh?.mp && fresh.mp.refreshTokenEnc !== conn.refreshTokenEnc) return fresh;
         await store.updateMpIfUnchanged(merchant.id, conn.refreshTokenEnc, { ...conn, state: 'needs_reauth' });
-        broadcast(merchant.id, 'account:changed', {});
         throw err;
       }
     })().finally(() => refreshes.delete(merchant.id));
@@ -246,16 +228,16 @@ export function createApp(config: AppConfig, store: Store) {
 
   function canIngest(merchant: Merchant, raw: MpRawPayment): boolean {
     if (!merchant.mp || !isCollectedBy(raw, merchant.mp.userId)) return false;
-    if (raw.live_mode !== true && !config.allowTestPayments) return false;
+    // Only an explicit false: the field isn't guaranteed in every response, and the collector
+    // check above already proves the money reached this account.
+    if (raw.live_mode === false && !config.allowTestPayments) return false;
     return true;
   }
 
   /** Old payments can't enter as new: a late refund notification must not ring the bell. */
   async function ingest(merchant: Merchant, raw: MpRawPayment, source: PaymentRecord['source']) {
     const notBefore = new Date(merchant.mp!.linkedAt).getTime() - IMPORT_WINDOW_MS;
-    const result = await store.upsertPayment(merchant.id, mapPayment(raw), source, notBefore);
-    if (result?.changed) broadcast(merchant.id, 'payments:changed', { id: result.payment.id, created: result.created });
-    return result;
+    return store.upsertPayment(merchant.id, mapPayment(raw), source, notBefore);
   }
 
   /**
@@ -549,7 +531,6 @@ export function createApp(config: AppConfig, store: Store) {
       if (previous && previous !== mpUserId) await store.releaseMpUser(ctx.merchant.id, previous);
       seenVersions.delete(ctx.merchant.id);
       lastSync.delete(ctx.merchant.id);
-      broadcast(ctx.merchant.id, 'account:changed', {});
       res.redirect('/?mp_linked=true');
     } catch (err) {
       console.error('[oauth] Falló el intercambio:', (err as Error).message);
@@ -562,7 +543,6 @@ export function createApp(config: AppConfig, store: Store) {
     await store.updateMerchant(merchant.id, { mp: null, mpUserId: null, revision: (merchant.revision || 0) + 1 });
     if (merchant.mpUserId) await store.releaseMpUser(merchant.id, merchant.mpUserId);
     seenVersions.delete(req.ctx.merchant.id);
-    broadcast(req.ctx.merchant.id, 'account:changed', {});
     res.json({ success: true });
   }));
 
@@ -573,34 +553,11 @@ export function createApp(config: AppConfig, store: Store) {
     res.json({
       ...publicMpStatus(req.ctx.merchant, req.ctx.session.role),
       appUrl: baseUrl(req),
-      connectedDevices: Math.max(1, channels.get(req.ctx.merchant.id)?.size || 0),
     });
   }));
 
-  app.get('/api/events', requireAuth((req, res) => {
-    const merchantId = req.ctx.merchant.id;
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-    });
-    res.write(': conectado\n\n');
-    const clients = channels.get(merchantId) || new Set<Response>();
-    channels.set(merchantId, clients);
-    clients.add(res);
-    broadcast(merchantId, 'devices:count', { connectedDevices: clients.size });
-
-    const heartbeat = setInterval(() => res.write(': keepalive\n\n'), 15_000);
-    req.on('close', () => {
-      clearInterval(heartbeat);
-      clients.delete(res);
-      if (clients.size === 0) channels.delete(merchantId);
-      else broadcast(merchantId, 'devices:count', { connectedDevices: clients.size });
-    });
-  }));
-
-  // Screens poll this. It also drives the periodic read from Mercado Pago, because
-  // Cloud Run gives no CPU to background timers between requests.
+  // Screens poll this. It also drives the periodic read from Mercado Pago: on serverless
+  // hosting (Vercel, Cloud Run) nothing runs between requests, so a timer wouldn't work.
   app.get('/api/payments', requireAuth(async (req, res) => {
     let merchant = req.ctx.merchant;
     const due = Date.now() - (lastSync.get(merchant.id) || 0) >= config.syncIntervalMs;
@@ -682,7 +639,6 @@ export function createApp(config: AppConfig, store: Store) {
     } else if (result.outcome === 'already_decided') {
       res.status(409).json({ error: `Este pago ya fue resuelto por ${result.payment.saleVerification.acceptedBy}.`, payment: result.payment });
     } else {
-      broadcast(merchant.id, 'payments:changed', { id: result.payment.id });
       res.json({ success: true, payment: result.payment });
     }
   }));
@@ -694,7 +650,7 @@ export function createApp(config: AppConfig, store: Store) {
       return;
     }
     const amount = (Math.floor(Math.random() * 65) + 12) * 1000;
-    const { payment } = await store.upsertPayment(
+    const { payment } = (await store.upsertPayment(
       req.ctx.merchant.id,
       {
         id: `SIM-${Date.now()}`,
@@ -713,14 +669,8 @@ export function createApp(config: AppConfig, store: Store) {
         payer: { firstName: 'Cliente', lastName: 'de Prueba', fullName: 'Cliente de Prueba', email: '' },
       },
       'simulation',
-    ) as { payment: PaymentRecord };
-    broadcast(req.ctx.merchant.id, 'payments:changed', { id: payment.id, created: true });
+    )) as { payment: PaymentRecord };
     res.json({ success: true, payment });
-  }));
-
-  app.post('/api/devices/ping', requireAuth((req, res) => {
-    broadcast(req.ctx.merchant.id, 'devices:ping', { timestamp: new Date().toISOString() });
-    res.json({ success: true, activeDevices: channels.get(req.ctx.merchant.id)?.size || 0 });
   }));
 
   // -------------------------------------------------------------------------

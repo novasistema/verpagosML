@@ -1,6 +1,6 @@
 {
   "name": "Corroborador de Pagos Mercado Pago",
-  "description": "Sistema en tiempo real para corroborar acreditación de pagos de Mercado Pago con datos del cliente y confirmación de pagos de venta.",
+  "description": "Los cobros de Mercado Pago de tu comercio, confirmados en tus cajas sin fotos de comprobantes.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

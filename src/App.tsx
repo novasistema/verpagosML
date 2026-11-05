@@ -15,7 +15,9 @@ import { PaymentItem, AppServerStatus, MpStatus, SessionInfo, VerifySalePayload,
 import { soundNotifier } from './utils/audio';
 import { api, ApiError } from './api';
 
-const POLL_INTERVAL_MS = 5000;
+// Each check costs a server call and a database read: slower when nobody is looking.
+const POLL_VISIBLE_MS = 8000;
+const POLL_HIDDEN_MS = 30000;
 
 const MP_ERRORS: Record<string, string> = {
   cancelled: 'La autorización en Mercado Pago se canceló.',
@@ -95,7 +97,7 @@ function Dashboard({ session, onLogout }: { session: SessionInfo; onLogout: () =
   const [isMpLinkOpen, setIsMpLinkOpen] = useState(false);
   const [mpLinkError, setMpLinkError] = useState<string | null>(null);
   const [isTeamShareOpen, setIsTeamShareOpen] = useState(false);
-  const [connectedDevicesCount, setConnectedDevicesCount] = useState(1);
+  const [isSoundReady, setIsSoundReady] = useState(false);
 
   // Instant full-screen phone approval modal
   const [instantApprovalPayment, setInstantApprovalPayment] = useState<PaymentItem | null>(null);
@@ -131,6 +133,7 @@ function Dashboard({ session, onLogout }: { session: SessionInfo; onLogout: () =
       const fresh = waiting.filter((p) => !known.has(p.id));
       if (fresh.length > 0) {
         soundNotifier.playPaymentChime();
+        navigator.vibrate?.([200, 100, 200]);
         // Never swap a payment under a cashier who may be about to tap Confirm.
         setInstantApprovalPayment((current) => current ?? fresh[0]);
         setNewIncomingPayment((current) => current ?? fresh[0]);
@@ -162,7 +165,6 @@ function Dashboard({ session, onLogout }: { session: SessionInfo; onLogout: () =
     try {
       const data = await api<AppServerStatus>('/api/status');
       setServerStatus(data);
-      if (data.connectedDevices) setConnectedDevicesCount(data.connectedDevices);
     } catch (err) {
       console.error('Error fetching status:', err);
     }
@@ -180,36 +182,59 @@ function Dashboard({ session, onLogout }: { session: SessionInfo; onLogout: () =
     [],
   );
 
-  // Live events are only a shortcut: polling works even if they fail or the server has several instances.
   useEffect(() => {
     fetchStatus().then(fetchPayments);
 
-    const eventSource = new EventSource('/api/events');
-    eventSource.onopen = () => setIsConnected(true);
-    eventSource.addEventListener('devices:count', (e: MessageEvent) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (typeof data.connectedDevices === 'number') setConnectedDevicesCount(data.connectedDevices);
-      } catch {
-        // ignore
-      }
-    });
-    eventSource.addEventListener('devices:ping', () => soundNotifier.playPaymentChime());
-    eventSource.addEventListener('payments:changed', () => fetchPayments());
-    eventSource.addEventListener('account:changed', () => fetchStatus());
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      timer = setTimeout(async () => {
+        await fetchPayments();
+        schedule();
+      }, document.visibilityState === 'visible' ? POLL_VISIBLE_MS : POLL_HIDDEN_MS);
+    };
+    schedule();
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') fetchPayments();
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    const poll = setInterval(fetchPayments, POLL_INTERVAL_MS);
 
     return () => {
-      eventSource.close();
+      clearTimeout(timer);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
-      clearInterval(poll);
     };
   }, [fetchPayments, fetchStatus]);
+
+  // Browsers only allow sound after the person touches the page once.
+  useEffect(() => {
+    const unlock = async () => {
+      if (await soundNotifier.unlockMobileAudio()) {
+        setIsSoundReady(true);
+        window.removeEventListener('pointerdown', unlock);
+      }
+    };
+    window.addEventListener('pointerdown', unlock);
+    return () => window.removeEventListener('pointerdown', unlock);
+  }, []);
+
+  // A phone at the counter must not go dark: with the screen off, no alert can show.
+  useEffect(() => {
+    let lock: WakeLockSentinel | null = null;
+    const keepAwake = async () => {
+      if (document.visibilityState !== 'visible' || !navigator.wakeLock) return;
+      try {
+        lock = await navigator.wakeLock.request('screen');
+      } catch {
+        // Not allowed here (low battery, old browser): the app keeps working.
+      }
+    };
+    keepAwake();
+    document.addEventListener('visibilitychange', keepAwake);
+    return () => {
+      document.removeEventListener('visibilitychange', keepAwake);
+      lock?.release().catch(() => undefined);
+    };
+  }, []);
 
   // Back from Mercado Pago's authorization
   useEffect(() => {
@@ -351,6 +376,12 @@ function Dashboard({ session, onLogout }: { session: SessionInfo; onLogout: () =
   }, [payments, activeTab, searchQuery]);
 
   const pendingCount = payments.filter(needsApproval).length;
+
+  // Visible on the browser tab while working in another window.
+  useEffect(() => {
+    document.title = pendingCount > 0 ? `(${pendingCount}) Cobro por confirmar` : 'Corroborador de Pagos';
+  }, [pendingCount]);
+
   const acceptedCount = payments.filter((p) => p.saleVerification.status === 'accepted').length;
 
   return (
@@ -368,7 +399,6 @@ function Dashboard({ session, onLogout }: { session: SessionInfo; onLogout: () =
         isSimulating={isSimulating}
         hasPending={pendingCount > 0}
         pendingCount={pendingCount}
-        connectedDevices={connectedDevicesCount}
         linkedAccount={serverStatus?.linkedAccount}
         isMpConfigured={serverStatus?.configured}
         needsReauth={serverStatus?.needsReauth}
@@ -386,6 +416,12 @@ function Dashboard({ session, onLogout }: { session: SessionInfo; onLogout: () =
       {syncFeedback && (
         <div className="bg-sky-900 text-sky-100 px-4 py-2 text-xs text-center border-b border-sky-800 animate-in fade-in">
           {syncFeedback}
+        </div>
+      )}
+
+      {!isSoundReady && serverStatus?.configured && (
+        <div id="sound-hint" className="bg-amber-400 text-slate-950 px-4 py-2 text-xs font-bold text-center">
+          Tocá la pantalla una vez para activar el sonido de los cobros.
         </div>
       )}
 
@@ -488,7 +524,7 @@ function Dashboard({ session, onLogout }: { session: SessionInfo; onLogout: () =
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition cursor-pointer"
               >
                 <Smartphone className="w-3.5 h-3.5 text-emerald-200" />
-                <span>Ver en Celular (QR)</span>
+                <span>Abrir en otro dispositivo</span>
               </button>
             </div>
           </div>
@@ -684,8 +720,6 @@ function Dashboard({ session, onLogout }: { session: SessionInfo; onLogout: () =
         isOpen={isDeviceSyncOpen}
         onClose={() => setIsDeviceSyncOpen(false)}
         appUrl={serverStatus?.appUrl || ''}
-        connectedDevices={connectedDevicesCount}
-        onSimulateTestPayment={allowSimulation ? handleSimulatePayment : undefined}
       />
 
       {/* Modal: Cuenta de Mercado Pago */}

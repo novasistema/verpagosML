@@ -4,9 +4,9 @@
  * Uses the same configuration as the server and closes the owner's open sessions.
  */
 import dotenv from 'dotenv';
-import { loadConfig } from '../server/config';
-import { hashPassword } from '../server/security';
-import { createStore } from '../server/store';
+import { loadConfig } from '../server/config.js';
+import { hashPassword } from '../server/security.js';
+import { createStore } from '../server/store.js';
 
 dotenv.config();
 

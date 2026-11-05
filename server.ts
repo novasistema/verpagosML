@@ -1,26 +1,14 @@
 import dotenv from 'dotenv';
 import express from 'express';
 import path from 'path';
-import { createApp } from './server/app';
-import { loadConfig } from './server/config';
-import { FileStore, createStore, Store } from './server/store';
+import { buildApp } from './server/boot.js';
 
 dotenv.config({ path: ['.env.local', '.env'] });
 
 const PORT = Number(process.env.PORT) || 3000;
 
 async function startServer() {
-  const config = loadConfig();
-
-  if (config.missing.length > 0) {
-    console.error(`[config] Faltan variables de entorno: ${config.missing.join(', ')}`);
-  }
-
-  // With configuration missing the app stays up and the screen lists what is needed.
-  // The empty store is never used: every API route answers 503 before reaching it.
-  const store: Store = config.missing.length > 0 ? new FileStore(path.join(config.dataDir, 'unused')) : await createStore(config);
-
-  const app = createApp(config, store);
+  const { app, config } = await buildApp();
 
   if (!config.production) {
     const { createServer } = await import('vite');

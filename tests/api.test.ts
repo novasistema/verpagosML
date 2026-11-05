@@ -6,10 +6,10 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import { createApp } from '../server/app';
-import { loadConfig } from '../server/config';
-import { FileStore } from '../server/store';
-import { MockMp } from './mock-mp';
+import { createApp } from '../server/app.js';
+import { loadConfig } from '../server/config.js';
+import { FileStore } from '../server/store.js';
+import { MockMp } from './mock-mp.js';
 
 const WEBHOOK_SECRET = 'whsec-test';
 const mock = new MockMp();
@@ -576,11 +576,24 @@ describe('review regressions', () => {
     assert.equal((await client.post('/api/payments/10007/verify-sale', { status: 'rejected' })).status, 200);
   });
 
-  it('a payment with no live_mode counts as not real', async () => {
+  it('a missing live_mode does not hide a real payment', async () => {
     const { client, seller } = await connected();
     const { live_mode: _, ...raw } = mock.addPayment('10008', seller);
     mock.payments.set('10008', raw);
-    assert.deepEqual(await paymentsOf(client), []);
+    assert.deepEqual((await paymentsOf(client)).map((p) => p.id), ['10008']);
+  });
+
+  it("a bank transfer never shows the shop's own data as the customer", async () => {
+    const { client, seller } = await connected();
+    const shop = { id: seller, email: 'tienda@mail.com', identification: { type: 'CUIT', number: '20111' } };
+    mock.addPayment('10009', seller, { operation_type: 'account_fund', payer: shop });
+    mock.addPayment('10010', seller, { operation_type: 'money_transfer', payer: { ...shop, id: 'otro', email: 'cliente@mail.com' } });
+    const byId = Object.fromEntries((await paymentsOf(client)).map((p) => [p.id, p]));
+    assert.equal(byId['10009'].payer.fullName, 'Titular no informado');
+    assert.equal(byId['10009'].payer.email, '');
+    assert.equal(byId['10009'].payer.identificationNumber, undefined);
+    assert.equal(byId['10010'].payer.fullName, 'cliente@mail.com');
+    assert.equal(byId['10010'].payer.identificationNumber, '20111');
   });
 
   it('after disconnecting, the same account can connect to another merchant', async () => {
@@ -605,6 +618,13 @@ describe('brute force', () => {
 });
 
 describe('configuration', () => {
+  it('takes the public URL from Vercel when APP_URL is not set', () => {
+    const env = { NODE_ENV: 'production', VERCEL_ENV: 'production', VERCEL_PROJECT_PRODUCTION_URL: 'pagos.vercel.app', DATA_DIR: dataDir };
+    const config = loadConfig({ ...env, APP_URL: 'MY_APP_URL' } as NodeJS.ProcessEnv);
+    assert.equal(config.appUrl, 'https://pagos.vercel.app');
+    assert.equal(config.missing.includes('APP_URL'), false);
+  });
+
   it('lists what is missing in production and blocks the API', async () => {
     const config = loadConfig({ NODE_ENV: 'production', DATA_DIR: dataDir } as NodeJS.ProcessEnv);
     assert.ok(config.missing.includes('FIREBASE_SERVICE_ACCOUNT'));

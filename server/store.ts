@@ -1,8 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import type { AppConfig } from './config';
-import type { Merchant, MpConnection, MpPaymentFields, PaymentRecord, SaleVerificationData } from './types';
+import type { AppConfig } from './config.js';
+import type { Merchant, MpConnection, MpPaymentFields, PaymentRecord, SaleVerificationData } from './types.js';
 
 export class EmailTakenError extends Error {}
 

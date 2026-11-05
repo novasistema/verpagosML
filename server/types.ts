@@ -27,6 +27,8 @@ export interface MpPaymentFields {
   dateLastUpdated?: string;
   /** Mercado Pago account that received the money. */
   collectorId?: string;
+  /** money_transfer, account_fund, regular_payment... as Mercado Pago reports it. */
+  operationType?: string;
   transactionAmountRefunded?: number;
   status: string;
   statusDetail: string;

@@ -28,7 +28,6 @@ interface HeaderProps {
   isSimulating: boolean;
   hasPending?: boolean;
   pendingCount?: number;
-  connectedDevices?: number;
   linkedAccount?: LinkedMpAccount | null;
   isMpConfigured?: boolean;
   needsReauth?: boolean;
@@ -51,7 +50,6 @@ export function Header({
   isSimulating,
   hasPending,
   pendingCount = 0,
-  connectedDevices = 1,
   linkedAccount,
   isMpConfigured,
   needsReauth,
@@ -192,13 +190,10 @@ export function Header({
             type="button"
             onClick={onOpenDeviceSync}
             className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-emerald-950/80 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-900 active:scale-98 transition shadow-xs cursor-pointer"
-            title="Conectar celular y ver en tiempo real en otros dispositivos"
+            title="Abrir en otro dispositivo"
           >
-            <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-            <span className="hidden sm:inline">En Vivo</span>
-            <span className="px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-bold">
-              {connectedDevices}
-            </span>
+            <Radio className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="hidden sm:inline">Otro dispositivo</span>
           </button>
 
           {/* Sound Notification Toggle */}

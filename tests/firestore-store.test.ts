@@ -4,8 +4,8 @@
  */
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { EmailTakenError, FirestoreStore, parseServiceAccount } from '../server/store';
-import type { Merchant, MpPaymentFields } from '../server/types';
+import { EmailTakenError, FirestoreStore, parseServiceAccount } from '../server/store.js';
+import type { Merchant, MpPaymentFields } from '../server/types.js';
 
 const INC = Symbol('inc');
 

@@ -1,4 +1,4 @@
-import type { MpPaymentFields } from './types';
+import type { MpPaymentFields } from './types.js';
 
 export const MP_SEARCH_PAGE = 50;
 
@@ -36,6 +36,7 @@ export interface MpProfile {
 /** Raw Mercado Pago payment; only the fields this app reads. */
 export interface MpRawPayment {
   id: number | string;
+  operation_type?: string;
   collector_id?: number | string;
   collector?: { id?: number | string };
   live_mode?: boolean;
@@ -160,7 +161,13 @@ export function isCollectedBy(raw: MpRawPayment, mpUserId: string): boolean {
 }
 
 export function mapPayment(raw: MpRawPayment): MpPaymentFields {
-  const payer = raw.payer || {};
+  const collector = raw.collector_id ?? raw.collector?.id;
+  // In bank transfers (account_fund) Mercado Pago may report the receiving account as the payer.
+  // Showing the shop's own data as "the customer" would mislead the cashier.
+  const payerIsUnknown =
+    raw.operation_type === 'account_fund' ||
+    (raw.payer?.id !== undefined && collector !== undefined && String(raw.payer.id) === String(collector));
+  const payer = payerIsUnknown ? {} : raw.payer || {};
   const identification = payer.identification || {};
   const firstName = payer.first_name || '';
   const lastName = payer.last_name || '';
@@ -168,7 +175,7 @@ export function mapPayment(raw: MpRawPayment): MpPaymentFields {
     [firstName, lastName].filter(Boolean).join(' ') ||
     raw.point_of_interaction?.transaction_data?.bank_info?.payer?.long_name ||
     payer.email ||
-    'Cliente Mercado Pago';
+    'Titular no informado';
   const amount = raw.transaction_amount || 0;
   const fees = (raw.fee_details || []).reduce((sum, fee) => sum + (fee.amount || 0), 0);
 
@@ -177,7 +184,8 @@ export function mapPayment(raw: MpRawPayment): MpPaymentFields {
     dateCreated: raw.date_created || new Date().toISOString(),
     dateApproved: raw.date_approved || null,
     dateLastUpdated: raw.date_last_updated,
-    collectorId: String(raw.collector_id ?? raw.collector?.id ?? ''),
+    collectorId: String(collector ?? ''),
+    operationType: raw.operation_type,
     transactionAmountRefunded: raw.transaction_amount_refunded || undefined,
     status: raw.status || 'pending',
     statusDetail: raw.status_detail || '',
@@ -198,7 +206,7 @@ export function mapPayment(raw: MpRawPayment): MpPaymentFields {
       fullName,
       email: payer.email || '',
       phone: payer.phone?.number ? `${payer.phone.area_code || ''} ${payer.phone.number}`.trim() : undefined,
-      identificationType: identification.type,
+      identificationType: identification.number ? identification.type : undefined,
       identificationNumber: identification.number,
     },
   };

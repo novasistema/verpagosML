@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { randomToken } from './security';
+import { randomToken } from './security.js';
 
 export interface AppConfig {
   production: boolean;
@@ -51,7 +51,8 @@ function developmentSecret(dataDir: string): string {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const production = env.NODE_ENV === 'production';
   const dataDir = env.DATA_DIR || path.join(process.cwd(), 'data');
-  const appUrl = validUrl(env.APP_URL);
+  const vercelHost = env.VERCEL_ENV === 'production' ? env.VERCEL_PROJECT_PRODUCTION_URL : env.VERCEL_URL;
+  const appUrl = validUrl(env.APP_URL) || (vercelHost ? validUrl(`https://${vercelHost}`) : null);
 
   const required: Record<string, boolean> = {
     APP_URL: Boolean(appUrl),

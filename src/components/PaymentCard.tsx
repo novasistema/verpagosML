@@ -12,7 +12,7 @@ import {
   Tag,
   ShieldCheck,
 } from 'lucide-react';
-import { MP_STATUS_LABELS, PaymentItem, needsApproval } from '../types';
+import { MP_STATUS_LABELS, PaymentItem, hasUnknownPayer, needsApproval } from '../types';
 
 interface PaymentCardProps {
   key?: string;
@@ -222,6 +222,13 @@ export function PaymentCard({
           <div className="mt-2 bg-rose-50 border border-rose-300 rounded-xl p-3 text-xs font-bold text-rose-900 flex items-center gap-2">
             <AlertCircle className="w-4 h-4 shrink-0" />
             Atención: esta venta fue aceptada, pero Mercado Pago ahora informa el pago como "{mpStatusLabel}".
+          </div>
+        )}
+
+        {isPending && hasUnknownPayer(payment) && (
+          <div className="mt-2 bg-sky-50 border border-sky-200 rounded-xl p-3 text-xs text-sky-900 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            Mercado Pago no informa quién la envió: confirmá por monto y hora.
           </div>
         )}
 

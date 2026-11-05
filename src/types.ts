@@ -27,6 +27,7 @@ export interface PaymentItem {
   dateCreated: string;
   dateApproved: string | null;
   transactionAmountRefunded?: number;
+  operationType?: string;
   status: PaymentStatus;
   statusDetail: string;
   transactionAmount: number;
@@ -65,7 +66,6 @@ export interface MpStatus {
 
 export interface AppServerStatus extends MpStatus {
   appUrl: string;
-  connectedDevices?: number;
 }
 
 export interface SessionInfo {
@@ -91,6 +91,11 @@ export const MP_STATUS_LABELS: Record<string, string> = {
   charged_back: 'con contracargo',
   other_account: 'de otra cuenta de Mercado Pago',
 };
+
+/** Mercado Pago doesn't say who sent it: the cashier has to check amount and time. */
+export function hasUnknownPayer(payment: PaymentItem): boolean {
+  return payment.source !== 'simulation' && !payment.payer.email && !payment.payer.identificationNumber;
+}
 
 export function needsApproval(payment: PaymentItem): boolean {
   return payment.status === 'approved' && payment.saleVerification.status === 'pending';
