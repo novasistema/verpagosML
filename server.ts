@@ -28,6 +28,11 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
+    // The server bundle sits in dist/ too: it must not be downloadable.
+    app.use((req, res, next) => {
+      if (req.path.startsWith('/server.cjs')) res.status(404).end();
+      else next();
+    });
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

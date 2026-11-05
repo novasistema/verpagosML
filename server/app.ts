@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import express, { NextFunction, Request, Response } from 'express';
 import type { AppConfig } from './config';
-import { MercadoPagoClient, MpError, MpRawPayment, isCollectedBy, mapPayment } from './mercadopago';
+import { MP_SEARCH_PAGE, MercadoPagoClient, MpError, MpRawPayment, isCollectedBy, mapPayment } from './mercadopago';
 import { Keyring, hashPassword, randomToken, verifyPassword, verifyWebhookSignature } from './security';
 import { EmailTakenError, Store } from './store';
 import type { Merchant, PaymentRecord, Role, SessionData } from './types';
@@ -178,8 +178,11 @@ export function createApp(config: AppConfig, store: Store) {
   // -------------------------------------------------------------------------
   const refreshes = new Map<string, Promise<Merchant>>();
 
-  /** Gets new tokens. Only a rejection from Mercado Pago asks the merchant to reconnect. */
-  function refreshConnection(merchant: Merchant): Promise<Merchant> {
+  /**
+   * Gets new tokens. Refresh tokens are single-use and several instances may try at once,
+   * so every write is conditional: a stale instance can't overwrite newer tokens or undo a disconnect.
+   */
+  function refreshConnection(merchant: Merchant, accessRejected = false): Promise<Merchant> {
     const running = refreshes.get(merchant.id);
     if (running) return running;
     const work = (async () => {
@@ -193,16 +196,24 @@ export function createApp(config: AppConfig, store: Store) {
           refreshTokenEnc: keys!.encrypt(tokens.refresh_token),
           expiresAt: new Date(Date.now() + tokens.expires_in * 1000).toISOString(),
         };
-        await store.updateMerchant(merchant.id, { mp: updated });
-        return { ...merchant, mp: updated };
-      } catch (err) {
-        if (err instanceof MpError && err.status >= 400 && err.status < 500 && err.status !== 429) {
-          // Another server instance may have just renewed it with this same refresh token.
-          const fresh = await store.getMerchant(merchant.id);
-          if (fresh?.mp && fresh.mp.refreshTokenEnc !== conn.refreshTokenEnc) return fresh;
-          await store.updateMerchant(merchant.id, { mp: { ...conn, state: 'needs_reauth' } });
-          broadcast(merchant.id, 'account:changed', {});
+        if (await store.updateMpIfUnchanged(merchant.id, conn.refreshTokenEnc, updated)) {
+          if (conn.state !== 'active') broadcast(merchant.id, 'account:changed', {});
+          return { ...merchant, mp: updated };
         }
+        const fresh = await store.getMerchant(merchant.id);
+        if (fresh?.mp) return fresh;
+        throw new MpError(401, 'La cuenta se desconectó durante la renovación');
+      } catch (err) {
+        if (!(err instanceof MpError) || err.status < 400 || err.status >= 500 || err.status === 429) throw err;
+        // Only a refused grant, or an access token that no longer works, means reconnecting.
+        const expired = new Date(conn.expiresAt).getTime() < Date.now();
+        if (!accessRejected && !expired && !/invalid_grant/i.test(err.message)) throw err;
+
+        await new Promise((resolve) => setTimeout(resolve, config.refreshSettleMs));
+        const fresh = await store.getMerchant(merchant.id);
+        if (fresh?.mp && fresh.mp.refreshTokenEnc !== conn.refreshTokenEnc) return fresh;
+        await store.updateMpIfUnchanged(merchant.id, conn.refreshTokenEnc, { ...conn, state: 'needs_reauth' });
+        broadcast(merchant.id, 'account:changed', {});
         throw err;
       }
     })().finally(() => refreshes.delete(merchant.id));
@@ -213,7 +224,8 @@ export function createApp(config: AppConfig, store: Store) {
   async function withToken<T>(merchant: Merchant, call: (token: string) => Promise<T>): Promise<T> {
     let current = merchant;
     if (!current.mp) throw new MpError(401, 'Sin cuenta de Mercado Pago conectada');
-    if (new Date(current.mp.expiresAt).getTime() - Date.now() < REFRESH_MARGIN_MS) {
+    const active = current.mp.state === 'active';
+    if (active && new Date(current.mp.expiresAt).getTime() - Date.now() < REFRESH_MARGIN_MS) {
       try {
         current = await refreshConnection(current);
       } catch (err) {
@@ -225,22 +237,37 @@ export function createApp(config: AppConfig, store: Store) {
     try {
       return await call(keys!.decrypt(current.mp!.accessTokenEnc));
     } catch (err) {
-      if (!(err instanceof MpError) || err.status !== 401) throw err;
-      current = await refreshConnection(current);
+      // Already known to be refused: don't call the token endpoint on every poll.
+      if (!(err instanceof MpError) || err.status !== 401 || !active) throw err;
+      current = await refreshConnection(current, true);
       return call(keys!.decrypt(current.mp!.accessTokenEnc));
     }
   }
 
   function canIngest(merchant: Merchant, raw: MpRawPayment): boolean {
     if (!merchant.mp || !isCollectedBy(raw, merchant.mp.userId)) return false;
-    if (raw.live_mode === false && !config.allowTestPayments) return false;
+    if (raw.live_mode !== true && !config.allowTestPayments) return false;
     return true;
   }
 
+  /** Old payments can't enter as new: a late refund notification must not ring the bell. */
   async function ingest(merchant: Merchant, raw: MpRawPayment, source: PaymentRecord['source']) {
-    const { payment, created, changed } = await store.upsertPayment(merchant.id, mapPayment(raw), source);
-    if (changed) broadcast(merchant.id, 'payments:changed', { id: payment.id, created });
-    return { payment, created, changed };
+    const notBefore = new Date(merchant.mp!.linkedAt).getTime() - IMPORT_WINDOW_MS;
+    const result = await store.upsertPayment(merchant.id, mapPayment(raw), source, notBefore);
+    if (result?.changed) broadcast(merchant.id, 'payments:changed', { id: result.payment.id, created: result.created });
+    return result;
+  }
+
+  /**
+   * After a disconnect or account change, Mercado Pago can no longer update these payments,
+   * so a pending one can't be trusted or accepted. Screens treat this as "not approved".
+   */
+  function forScreen(merchant: Merchant, payment: PaymentRecord): PaymentRecord {
+    const stale =
+      payment.source !== 'simulation' &&
+      payment.saleVerification.status === 'pending' &&
+      payment.collectorId !== merchant.mpUserId;
+    return stale ? { ...payment, status: 'other_account' } : payment;
   }
 
   const lastSync = new Map<string, number>();
@@ -256,23 +283,26 @@ export function createApp(config: AppConfig, store: Store) {
     if (running) return running;
     lastSync.set(merchant.id, Date.now());
     const work = (async () => {
-      const results = await withToken(merchant, (token) => mp.searchRecentPayments(token));
-      const floor = new Date(merchant.mp!.linkedAt).getTime() - IMPORT_WINDOW_MS;
       const seen = seenVersions.get(merchant.id) || new Map<string, string>();
-      const nextSeen = new Map<string, string>();
+      if (seen.size > 2000) seen.clear();
+      seenVersions.set(merchant.id, seen);
       let added = 0;
-      for (const raw of results) {
-        if (!canIngest(merchant, raw)) continue;
-        if (raw.date_created && new Date(raw.date_created).getTime() < floor) continue;
-        // Skips the database when nothing changed: this runs often and on every shop.
-        const version = `${raw.status}|${raw.status_detail}|${raw.date_last_updated}`;
-        const id = String(raw.id);
-        nextSeen.set(id, version);
-        if (seen.get(id) === version) continue;
-        const { created } = await ingest(merchant, raw, 'api_sync');
-        if (created) added += 1;
+      for (let offset = 0; offset < MP_SEARCH_PAGE * 4; offset += MP_SEARCH_PAGE) {
+        const page = await withToken(merchant, (token) => mp.searchRecentPayments(token, offset));
+        let anyNew = false;
+        for (const raw of page) {
+          if (!canIngest(merchant, raw)) continue;
+          // Skips the database when nothing changed: this runs often and on every shop.
+          const version = `${raw.status}|${raw.status_detail}|${raw.date_last_updated}`;
+          const id = String(raw.id);
+          if (seen.get(id) === version) continue;
+          anyNew = true;
+          const result = await ingest(merchant, raw, 'api_sync');
+          if (result?.created) added += 1;
+          seen.set(id, version);
+        }
+        if (!anyNew || page.length < MP_SEARCH_PAGE) break;
       }
-      seenVersions.set(merchant.id, nextSeen);
       return added;
     })().finally(() => syncing.delete(merchant.id));
     syncing.set(merchant.id, work);
@@ -494,11 +524,12 @@ export function createApp(config: AppConfig, store: Store) {
       const tokens = await mp.exchangeCode(code, redirectUri(req));
       const mpUserId = String(tokens.user_id);
 
-      const other = await store.findMerchantByMpUserId(mpUserId);
-      if (other && other.id !== ctx.merchant.id) return void fail('already_linked');
-
       const profile = await mp.getProfile(tokens.access_token);
+      if (!(await store.claimMpUser(ctx.merchant.id, mpUserId))) return void fail('already_linked');
+
+      const previous = ctx.merchant.mpUserId;
       await store.updateMerchant(ctx.merchant.id, {
+        revision: (ctx.merchant.revision || 0) + 1,
         mpUserId,
         mp: {
           userId: mpUserId,
@@ -515,6 +546,7 @@ export function createApp(config: AppConfig, store: Store) {
           state: 'active',
         },
       });
+      if (previous && previous !== mpUserId) await store.releaseMpUser(ctx.merchant.id, previous);
       seenVersions.delete(ctx.merchant.id);
       lastSync.delete(ctx.merchant.id);
       broadcast(ctx.merchant.id, 'account:changed', {});
@@ -526,7 +558,9 @@ export function createApp(config: AppConfig, store: Store) {
   }));
 
   app.post('/api/auth/mercadopago/unlink', requireOwner(async (req, res) => {
-    await store.updateMerchant(req.ctx.merchant.id, { mp: null, mpUserId: null });
+    const { merchant } = req.ctx;
+    await store.updateMerchant(merchant.id, { mp: null, mpUserId: null, revision: (merchant.revision || 0) + 1 });
+    if (merchant.mpUserId) await store.releaseMpUser(merchant.id, merchant.mpUserId);
     seenVersions.delete(req.ctx.merchant.id);
     broadcast(req.ctx.merchant.id, 'account:changed', {});
     res.json({ success: true });
@@ -570,7 +604,9 @@ export function createApp(config: AppConfig, store: Store) {
   app.get('/api/payments', requireAuth(async (req, res) => {
     let merchant = req.ctx.merchant;
     const due = Date.now() - (lastSync.get(merchant.id) || 0) >= config.syncIntervalMs;
-    if (merchant.mp?.state === 'active' && due) {
+    // Even after a refused renewal the current token may work for days: keep payments coming.
+    const usable = merchant.mp && (merchant.mp.state === 'active' || new Date(merchant.mp.expiresAt).getTime() > Date.now());
+    if (usable && due) {
       try {
         await syncMerchant(merchant);
         merchant = (await store.getMerchant(merchant.id)) || merchant;
@@ -584,7 +620,8 @@ export function createApp(config: AppConfig, store: Store) {
       res.json({ unchanged: true, status });
       return;
     }
-    res.json({ payments: await store.listPayments(merchant.id, 200), status });
+    const payments = await store.listPayments(merchant.id, 200);
+    res.json({ payments: payments.map((p) => forScreen(merchant, p)), status });
   }));
 
   app.post('/api/mercadopago/sync', requireAuth(async (req, res) => {
@@ -609,6 +646,27 @@ export function createApp(config: AppConfig, store: Store) {
   app.post('/api/payments/:id/verify-sale', requireAuth(async (req, res) => {
     const { merchant, session } = req.ctx;
     const rejected = req.body?.status === 'rejected';
+
+    if (!rejected) {
+      const current = await store.getPayment(merchant.id, req.params.id);
+      if (current && current.source !== 'simulation') {
+        if (current.collectorId !== merchant.mpUserId) {
+          res.status(409).json({
+            error: 'Este pago es de una cuenta de Mercado Pago que ya no está conectada. No se puede aceptar.',
+            payment: forScreen(merchant, current),
+          });
+          return;
+        }
+        // Last look right before accepting: it may have been refunded seconds ago.
+        // If Mercado Pago can't answer, the status it last confirmed stands.
+        try {
+          const raw = await withToken(merchant, (token) => mp.getPayment(token, current.id));
+          if (canIngest(merchant, raw)) await ingest(merchant, raw, current.source);
+        } catch (err) {
+          console.warn(`[verify] ${current.id}:`, (err as Error).message);
+        }
+      }
+    }
     const result = await store.decideSale(merchant.id, req.params.id, {
       status: rejected ? 'rejected' : 'accepted',
       acceptedAt: new Date().toISOString(),
@@ -655,7 +713,7 @@ export function createApp(config: AppConfig, store: Store) {
         payer: { firstName: 'Cliente', lastName: 'de Prueba', fullName: 'Cliente de Prueba', email: '' },
       },
       'simulation',
-    );
+    ) as { payment: PaymentRecord };
     broadcast(req.ctx.merchant.id, 'payments:changed', { id: payment.id, created: true });
     res.json({ success: true, payment });
   }));

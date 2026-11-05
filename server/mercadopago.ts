@@ -1,5 +1,7 @@
 import type { MpPaymentFields } from './types';
 
+export const MP_SEARCH_PAGE = 50;
+
 export class MpError extends Error {
   constructor(
     readonly status: number,
@@ -43,6 +45,7 @@ export interface MpRawPayment {
   status?: string;
   status_detail?: string;
   transaction_amount?: number;
+  transaction_amount_refunded?: number;
   transaction_details?: { net_received_amount?: number };
   fee_details?: { amount?: number }[];
   currency_id?: string;
@@ -131,14 +134,16 @@ export class MercadoPagoClient {
     return this.authed<MpRawPayment>(`/v1/payments/${encodeURIComponent(paymentId)}`, accessToken);
   }
 
-  async searchRecentPayments(accessToken: string): Promise<MpRawPayment[]> {
+  /** Payments that changed recently, newest change first, so late approvals and refunds are seen. */
+  async searchRecentPayments(accessToken: string, offset = 0): Promise<MpRawPayment[]> {
     const params = new URLSearchParams({
-      sort: 'date_created',
+      sort: 'date_last_updated',
       criteria: 'desc',
-      range: 'date_created',
+      range: 'date_last_updated',
       begin_date: 'NOW-2DAYS',
       end_date: 'NOW',
-      limit: '50',
+      limit: String(MP_SEARCH_PAGE),
+      offset: String(offset),
     });
     const data = await this.authed<{ results?: MpRawPayment[] }>(`/v1/payments/search?${params}`, accessToken);
     return data.results || [];
@@ -171,6 +176,9 @@ export function mapPayment(raw: MpRawPayment): MpPaymentFields {
     id: String(raw.id),
     dateCreated: raw.date_created || new Date().toISOString(),
     dateApproved: raw.date_approved || null,
+    dateLastUpdated: raw.date_last_updated,
+    collectorId: String(raw.collector_id ?? raw.collector?.id ?? ''),
+    transactionAmountRefunded: raw.transaction_amount_refunded || undefined,
     status: raw.status || 'pending',
     statusDetail: raw.status_detail || '',
     transactionAmount: amount,

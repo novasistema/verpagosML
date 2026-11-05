@@ -15,6 +15,8 @@ export interface AppConfig {
   allowSimulation: boolean;
   allowTestPayments: boolean;
   syncIntervalMs: number;
+  /** Wait before believing a refused renewal: another instance may be saving new tokens. */
+  refreshSettleMs: number;
   firebaseServiceAccount: string;
   firestoreDatabaseId: string;
   dataDir: string;
@@ -75,6 +77,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     allowSimulation: env.ALLOW_SIMULATION ? env.ALLOW_SIMULATION === 'true' : !production,
     allowTestPayments: env.ALLOW_TEST_PAYMENTS === 'true',
     syncIntervalMs: Number(env.MP_SYNC_INTERVAL_MS) || 20_000,
+    refreshSettleMs: Number(env.MP_REFRESH_SETTLE_MS) || 1500,
     firebaseServiceAccount: env.FIREBASE_SERVICE_ACCOUNT || '',
     firestoreDatabaseId: env.FIRESTORE_DATABASE_ID || '',
     dataDir,

@@ -104,6 +104,7 @@ before(async () => {
     MP_API_BASE: mock.base,
     MP_AUTH_BASE: mock.base,
     MP_SYNC_INTERVAL_MS: '1',
+    MP_REFRESH_SETTLE_MS: '1',
     ALLOW_SIMULATION: 'false',
   } as NodeJS.ProcessEnv);
   store = new FileStore(dataDir);
@@ -483,6 +484,109 @@ describe('polling', () => {
     mock.addPayment('9301', seller, { date_created: new Date(Date.now() - 2 * 86_400_000).toISOString() });
     mock.addPayment('9302', seller);
     assert.deepEqual((await paymentsOf(client)).map((p) => p.id), ['9302']);
+  });
+});
+
+describe('review regressions', () => {
+  const connected = async () => {
+    const seller = uniqueSeller();
+    const owner = await newOwner();
+    await connect(owner.client, seller);
+    return { ...owner, seller, merchant: (await store.findMerchantByEmail(owner.email))! };
+  };
+  const ago = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+
+  it('a late webhook for an old payment does not create a payment to approve', async () => {
+    const { client, seller } = await connected();
+    mock.addPayment('10001', seller, { date_created: ago(90) });
+    assert.equal((await webhook('10001', seller)).status, 200);
+    assert.deepEqual(await paymentsOf(client), []);
+  });
+
+  it('older data never undoes a newer status', async () => {
+    const { client, seller } = await connected();
+    mock.addPayment('10002', seller, { status: 'refunded', date_last_updated: ago(0) });
+    await webhook('10002', seller);
+    mock.addPayment('10002', seller, { status: 'approved', date_last_updated: ago(1) });
+    await webhook('10002', seller);
+    assert.equal((await paymentsOf(client))[0].status, 'refunded');
+  });
+
+  it('a refund seconds before accepting is caught at the last moment', async () => {
+    const { client, seller } = await connected();
+    mock.addPayment('10003', seller);
+    await paymentsOf(client);
+    mock.addPayment('10003', seller, { status: 'refunded', date_last_updated: new Date(Date.now() + 5000).toISOString() });
+    const res = await client.post('/api/payments/10003/verify-sale', { status: 'accepted' });
+    assert.equal(res.status, 409);
+    assert.equal(res.data.payment.status, 'refunded');
+  });
+
+  it('a Mercado Pago outage does not block accepting a confirmed payment', async () => {
+    const { client, seller } = await connected();
+    mock.addPayment('10004', seller);
+    await paymentsOf(client);
+    mock.down = true;
+    assert.equal((await client.post('/api/payments/10004/verify-sale', { status: 'accepted' })).status, 200);
+  });
+
+  it('a stale instance cannot overwrite tokens saved by another one', async () => {
+    const { merchant } = await connected();
+    const stale = { ...merchant.mp!, state: 'needs_reauth' as const };
+    await store.updateMerchant(merchant.id, { mp: { ...merchant.mp!, refreshTokenEnc: 'nuevo' } });
+    assert.equal(await store.updateMpIfUnchanged(merchant.id, merchant.mp!.refreshTokenEnc, stale), false);
+    assert.equal((await store.getMerchant(merchant.id))!.mp!.state, 'active');
+    await store.updateMerchant(merchant.id, { mp: null });
+    assert.equal(await store.updateMpIfUnchanged(merchant.id, 'nuevo', stale), false, 'no reconnect after unlink');
+    assert.equal((await store.getMerchant(merchant.id))!.mp, null);
+  });
+
+  it('an unrelated renewal error does not disconnect a healthy merchant', async () => {
+    const { client, seller, merchant } = await connected();
+    await store.updateMerchant(merchant.id, {
+      mp: { ...merchant.mp!, expiresAt: new Date(Date.now() + 86_400_000).toISOString() },
+    });
+    mock.refreshStatus = 403;
+    mock.addPayment('10005', seller);
+    try {
+      const res = await client.get('/api/payments');
+      assert.equal(res.data.status.configured, true);
+      assert.equal(res.data.payments.length, 1);
+    } finally {
+      mock.refreshStatus = 0;
+    }
+  });
+
+  it('payments keep arriving after a refused renewal while the token still works', async () => {
+    const { client, seller, merchant } = await connected();
+    await store.updateMerchant(merchant.id, { mp: { ...merchant.mp!, state: 'needs_reauth' } });
+    mock.addPayment('10006', seller);
+    const res = await client.get('/api/payments');
+    assert.equal(res.data.status.needsReauth, true);
+    assert.equal(res.data.payments.length, 1);
+  });
+
+  it("payments from a disconnected account can't be accepted", async () => {
+    const { client, seller } = await connected();
+    mock.addPayment('10007', seller);
+    await paymentsOf(client);
+    await client.post('/api/auth/mercadopago/unlink');
+    assert.equal((await paymentsOf(client))[0].status, 'other_account');
+    assert.equal((await client.post('/api/payments/10007/verify-sale', { status: 'accepted' })).status, 409);
+    assert.equal((await client.post('/api/payments/10007/verify-sale', { status: 'rejected' })).status, 200);
+  });
+
+  it('a payment with no live_mode counts as not real', async () => {
+    const { client, seller } = await connected();
+    const { live_mode: _, ...raw } = mock.addPayment('10008', seller);
+    mock.payments.set('10008', raw);
+    assert.deepEqual(await paymentsOf(client), []);
+  });
+
+  it('after disconnecting, the same account can connect to another merchant', async () => {
+    const { client, seller } = await connected();
+    await client.post('/api/auth/mercadopago/unlink');
+    assert.equal((await connect((await newOwner()).client, seller)).location, '/?mp_linked=true');
   });
 });
 

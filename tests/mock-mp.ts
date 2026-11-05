@@ -12,6 +12,7 @@ export class MockMp {
   refreshTokens = new Map<string, string>();
   payments = new Map<string, any>();
   rejectRefresh = false;
+  refreshStatus = 0;
   down = false;
   refreshCount = 0;
   searchCount = 0;
@@ -49,7 +50,8 @@ export class MockMp {
         this.codes.delete(code);
       } else if (grant_type === 'refresh_token') {
         this.refreshCount += 1;
-        if (this.rejectRefresh) return void res.status(400).json({ message: 'invalid_grant' });
+        if (this.refreshStatus) return void res.status(this.refreshStatus).json({ message: 'otro error' });
+        if (this.rejectRefresh) return void res.status(400).json({ error: 'invalid_grant' });
         seller = this.refreshTokens.get(refresh_token);
         this.refreshTokens.delete(refresh_token);
       }

@@ -12,7 +12,7 @@ import {
   Tag,
   ShieldCheck,
 } from 'lucide-react';
-import { PaymentItem, needsApproval } from '../types';
+import { MP_STATUS_LABELS, PaymentItem, needsApproval } from '../types';
 
 interface PaymentCardProps {
   key?: string;
@@ -33,17 +33,7 @@ export function PaymentCard({
   const isPending = needsApproval(payment);
   const isWaitingOnMp = payment.status !== 'approved' && payment.saleVerification.status === 'pending';
   const isAccepted = payment.saleVerification.status === 'accepted';
-  const mpStatusLabel =
-    {
-      pending: 'pendiente',
-      in_process: 'en revisión',
-      authorized: 'autorizado sin acreditar',
-      rejected: 'rechazado',
-      cancelled: 'cancelado',
-      refunded: 'devuelto',
-      in_mediation: 'en mediación',
-      charged_back: 'con contracargo',
-    }[payment.status as string] || payment.status;
+  const mpStatusLabel = MP_STATUS_LABELS[payment.status] || payment.status;
   const isRejected = payment.saleVerification.status === 'rejected';
 
   const formatCurrency = (amount: number) => {
@@ -160,7 +150,7 @@ export function PaymentCard({
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-100">
           {/* Amount & Method */}
           <div>
-            <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">Monto Acreditado</span>
+            <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">{payment.status === 'approved' ? 'Monto Acreditado' : 'Monto'}</span>
             <div className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight flex items-baseline gap-2 mt-0.5">
               <span>{formatCurrency(payment.transactionAmount)}</span>
               <span className="text-xs font-normal text-slate-500">
@@ -232,6 +222,13 @@ export function PaymentCard({
           <div className="mt-2 bg-rose-50 border border-rose-300 rounded-xl p-3 text-xs font-bold text-rose-900 flex items-center gap-2">
             <AlertCircle className="w-4 h-4 shrink-0" />
             Atención: esta venta fue aceptada, pero Mercado Pago ahora informa el pago como "{mpStatusLabel}".
+          </div>
+        )}
+
+        {Boolean(payment.transactionAmountRefunded) && payment.status === 'approved' && (
+          <div className="mt-2 bg-amber-50 border border-amber-300 rounded-xl p-3 text-xs font-bold text-amber-900 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            Mercado Pago informa una devolución parcial de {formatCurrency(payment.transactionAmountRefunded!)}.
           </div>
         )}
 

@@ -1,4 +1,4 @@
-export type PaymentStatus = 'approved' | 'in_process' | 'rejected' | 'refunded' | 'pending' | 'authorized' | 'cancelled' | 'in_mediation' | 'charged_back';
+export type PaymentStatus = 'approved' | 'in_process' | 'rejected' | 'refunded' | 'pending' | 'authorized' | 'cancelled' | 'in_mediation' | 'charged_back' | 'other_account';
 
 export type SaleVerificationStatus = 'pending' | 'accepted' | 'rejected';
 
@@ -26,6 +26,7 @@ export interface PaymentItem {
   id: string;
   dateCreated: string;
   dateApproved: string | null;
+  transactionAmountRefunded?: number;
   status: PaymentStatus;
   statusDetail: string;
   transactionAmount: number;
@@ -79,6 +80,18 @@ export interface SessionInfo {
 }
 
 /** Waiting for the cashier: only money Mercado Pago already approved. */
+export const MP_STATUS_LABELS: Record<string, string> = {
+  pending: 'pendiente',
+  in_process: 'en revisión',
+  authorized: 'autorizado sin acreditar',
+  rejected: 'rechazado',
+  cancelled: 'cancelado',
+  refunded: 'devuelto',
+  in_mediation: 'en mediación',
+  charged_back: 'con contracargo',
+  other_account: 'de otra cuenta de Mercado Pago',
+};
+
 export function needsApproval(payment: PaymentItem): boolean {
   return payment.status === 'approved' && payment.saleVerification.status === 'pending';
 }

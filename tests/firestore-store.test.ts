@@ -23,6 +23,9 @@ class FakeDoc {
   async get() {
     return this.db.snap(this.path);
   }
+  async delete() {
+    this.db.data.delete(this.path);
+  }
   async update(patch: any) {
     this.db.applyUpdate(this.path, patch);
   }
@@ -90,6 +93,7 @@ class FakeDb {
         }),
       set: (ref: FakeDoc, value: any) => writes.push(() => this.data.set(ref.path, value)),
       update: (ref: FakeDoc, patch: any) => writes.push(() => this.applyUpdate(ref.path, patch)),
+      delete: (ref: FakeDoc) => writes.push(() => this.data.delete(ref.path)),
     });
     writes.forEach((w) => w());
     return result;
@@ -155,9 +159,9 @@ describe('FirestoreStore', () => {
     await store.createMerchant(merchant('a', 'a@x.com'));
     await store.createMerchant(merchant('b', 'b@x.com'));
 
-    assert.equal((await store.upsertPayment('a', payment('1'), 'webhook')).created, true);
+    assert.equal((await store.upsertPayment('a', payment('1'), 'webhook'))!.created, true);
     assert.equal((await store.getMerchant('a'))!.revision, 1);
-    assert.equal((await store.upsertPayment('a', payment('1'), 'api_sync')).changed, false);
+    assert.equal((await store.upsertPayment('a', payment('1'), 'api_sync'))!.changed, false);
     assert.equal((await store.getMerchant('a'))!.revision, 1);
     assert.equal(await store.listPayments('b', 10).then((l) => l.length), 0);
 
@@ -168,8 +172,8 @@ describe('FirestoreStore', () => {
     assert.equal((await store.decideSale('b', '1', { status: 'accepted' })).outcome, 'not_found');
 
     const refunded = await store.upsertPayment('a', payment('1', { status: 'refunded' }), 'api_sync');
-    assert.equal(refunded.payment.saleVerification.acceptedBy, 'Lucas');
-    assert.equal(refunded.payment.source, 'webhook');
+    assert.equal(refunded!.payment.saleVerification.acceptedBy, 'Lucas');
+    assert.equal(refunded!.payment.source, 'webhook');
 
     await store.upsertPayment('a', payment('2', { status: 'in_process' }), 'api_sync');
     assert.equal((await store.decideSale('a', '2', { status: 'accepted' })).outcome, 'not_approved');
@@ -178,6 +182,46 @@ describe('FirestoreStore', () => {
     // Nothing undefined reaches the database.
     const raw = db.data.get('merchants/a/payments/1');
     assert.equal('cardLastFourDigits' in raw, false);
+  });
+
+  it('field order coming back from the database is not a change', async () => {
+    const { store, db } = setup();
+    await store.createMerchant(merchant('a', 'a@x.com'));
+    await store.upsertPayment('a', payment('1'), 'webhook');
+    const path = 'merchants/a/payments/1';
+    const reverse = (o: any) => Object.fromEntries(Object.entries(o).reverse());
+    const raw = db.data.get(path);
+    db.data.set(path, reverse({ ...raw, payer: reverse(raw.payer) }));
+    assert.equal((await store.upsertPayment('a', payment('1'), 'api_sync'))!.changed, false);
+  });
+
+  it('holds one Mercado Pago account per merchant and writes tokens conditionally', async () => {
+    const { store } = setup();
+    await store.createMerchant(merchant('a', 'a@x.com'));
+    assert.equal(await store.claimMpUser('a', '9'), true);
+    assert.equal(await store.claimMpUser('a', '9'), true);
+    assert.equal(await store.claimMpUser('b', '9'), false);
+    await store.releaseMpUser('b', '9');
+    assert.equal(await store.claimMpUser('b', '9'), false, 'only the holder releases');
+    await store.releaseMpUser('a', '9');
+    assert.equal(await store.claimMpUser('b', '9'), true);
+
+    const mp = { refreshTokenEnc: 'r1', state: 'active' } as any;
+    await store.updateMerchant('a', { mp });
+    assert.equal(await store.updateMpIfUnchanged('a', 'r0', { ...mp, refreshTokenEnc: 'x' }), false);
+    assert.equal(await store.updateMpIfUnchanged('a', 'r1', { ...mp, refreshTokenEnc: 'r2' }), true);
+    assert.equal((await store.getMerchant('a'))!.mp!.refreshTokenEnc, 'r2');
+  });
+
+  it('does not create records older than the limit, and ignores older data', async () => {
+    const { store } = setup();
+    await store.createMerchant(merchant('a', 'a@x.com'));
+    assert.equal(await store.upsertPayment('a', payment('1'), 'webhook', Date.parse('2027-01-01')), null);
+    await store.upsertPayment('a', payment('2', { dateLastUpdated: '2026-02-02T00:00:00Z', status: 'refunded' }), 'webhook');
+    const old = await store.upsertPayment('a', payment('2', { dateLastUpdated: '2026-02-01T00:00:00Z' }), 'api_sync');
+    assert.equal(old!.changed, false);
+    assert.equal((await store.getPayment('a', '2'))!.status, 'refunded');
+    assert.equal(await store.getPayment('a', '9'), null);
   });
 
   it('reads the service account as JSON or Base64', () => {

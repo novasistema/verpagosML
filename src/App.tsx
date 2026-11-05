@@ -131,8 +131,9 @@ function Dashboard({ session, onLogout }: { session: SessionInfo; onLogout: () =
       const fresh = waiting.filter((p) => !known.has(p.id));
       if (fresh.length > 0) {
         soundNotifier.playPaymentChime();
-        setInstantApprovalPayment(fresh[0]);
-        setNewIncomingPayment(fresh[0]);
+        // Never swap a payment under a cashier who may be about to tap Confirm.
+        setInstantApprovalPayment((current) => current ?? fresh[0]);
+        setNewIncomingPayment((current) => current ?? fresh[0]);
       }
     }
     waitingIdsRef.current = new Set(waiting.map((p) => p.id));

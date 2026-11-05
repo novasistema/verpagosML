@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import type { AppConfig } from './config';
-import type { Merchant, MpPaymentFields, PaymentRecord, SaleVerificationData } from './types';
+import type { Merchant, MpConnection, MpPaymentFields, PaymentRecord, SaleVerificationData } from './types';
 
 export class EmailTakenError extends Error {}
 
@@ -27,8 +27,22 @@ export interface Store {
   findMerchantBySellerCodeHash(hash: string): Promise<Merchant | null>;
   updateMerchant(id: string, patch: Partial<Merchant>): Promise<void>;
   listPayments(merchantId: string, limit: number): Promise<PaymentRecord[]>;
-  /** Saves Mercado Pago's data for a payment, keeping the merchant's sale decision untouched. */
-  upsertPayment(merchantId: string, fields: MpPaymentFields, source: PaymentRecord['source']): Promise<UpsertResult>;
+  getPayment(merchantId: string, paymentId: string): Promise<PaymentRecord | null>;
+  /**
+   * Saves Mercado Pago's data for a payment, keeping the merchant's sale decision untouched.
+   * Returns null when it would be a new record older than `notBefore` (milliseconds).
+   */
+  upsertPayment(
+    merchantId: string,
+    fields: MpPaymentFields,
+    source: PaymentRecord['source'],
+    notBefore?: number,
+  ): Promise<UpsertResult | null>;
+  /** Writes the connection only if nobody replaced the refresh token or disconnected meanwhile. */
+  updateMpIfUnchanged(merchantId: string, expectedRefreshTokenEnc: string, mp: MpConnection): Promise<boolean>;
+  /** Atomically reserves a Mercado Pago account for one merchant. False if another one holds it. */
+  claimMpUser(merchantId: string, mpUserId: string): Promise<boolean>;
+  releaseMpUser(merchantId: string, mpUserId: string): Promise<void>;
   /** Atomic: when two cashiers answer at once, only the first decision is kept. */
   decideSale(merchantId: string, paymentId: string, decision: SaleVerificationData): Promise<DecideResult>;
 }
@@ -45,16 +59,32 @@ function applyDecision(current: PaymentRecord | null, decision: SaleVerification
   return { outcome: 'ok', payment: { ...current, saleVerification: decision } };
 }
 
+/** Text form with sorted keys: databases don't guarantee the order of a stored object's fields. */
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_key, val) =>
+    val && typeof val === 'object' && !Array.isArray(val)
+      ? Object.fromEntries(Object.entries(val).sort(([a], [b]) => a.localeCompare(b)))
+      : val,
+  );
+}
+
 function mergePayment(
   current: PaymentRecord | null,
   fields: MpPaymentFields,
   source: PaymentRecord['source'],
-): UpsertResult {
+  notBefore?: number,
+): UpsertResult | null {
   if (!current) {
+    if (notBefore !== undefined && new Date(fields.dateCreated).getTime() < notBefore) return null;
     return { payment: { ...fields, saleVerification: { status: 'pending' }, source }, created: true, changed: true };
   }
+  // The webhook and the periodic read can overlap: older data must not undo a newer status.
+  const known = Date.parse(current.dateLastUpdated || '');
+  const incoming = Date.parse(fields.dateLastUpdated || '');
+  if (incoming < known) return { payment: current, created: false, changed: false };
+
   const payment: PaymentRecord = { ...current, ...fields };
-  return { payment, created: false, changed: JSON.stringify(current) !== JSON.stringify(payment) };
+  return { payment, created: false, changed: canonical(current) !== canonical(payment) };
 }
 
 /** Removes undefined values so both backends store exactly the same data. */
@@ -116,9 +146,28 @@ export class FileStore implements Store {
   async listPayments(merchantId: string, limit: number) {
     return clean(Object.values(this.data.payments[merchantId] || {}).sort(newest).slice(0, limit));
   }
-  async upsertPayment(merchantId: string, fields: MpPaymentFields, source: PaymentRecord['source']) {
+  async getPayment(merchantId: string, paymentId: string) {
+    const payment = this.data.payments[merchantId]?.[paymentId];
+    return payment ? clean(payment) : null;
+  }
+  async updateMpIfUnchanged(merchantId: string, expectedRefreshTokenEnc: string, mp: MpConnection) {
+    const merchant = this.data.merchants[merchantId];
+    if (merchant?.mp?.refreshTokenEnc !== expectedRefreshTokenEnc) return false;
+    merchant.mp = clean(mp);
+    this.save();
+    return true;
+  }
+  async claimMpUser(merchantId: string, mpUserId: string) {
+    const holder = Object.values(this.data.merchants).find((m) => m.mpUserId === mpUserId);
+    return !holder || holder.id === merchantId;
+  }
+  async releaseMpUser() {
+    // Here the claim is the merchant's own mpUserId field.
+  }
+  async upsertPayment(merchantId: string, fields: MpPaymentFields, source: PaymentRecord['source'], notBefore?: number) {
     const bucket = (this.data.payments[merchantId] ||= {});
-    const result = mergePayment(bucket[fields.id] || null, clean(fields), source);
+    const result = mergePayment(bucket[fields.id] || null, clean(fields), source, notBefore);
+    if (!result) return null;
     if (result.changed) {
       bucket[fields.id] = clean(result.payment);
       this.data.merchants[merchantId].revision += 1;
@@ -143,6 +192,7 @@ export class FileStore implements Store {
 //   merchants/{id}
 //   merchants/{id}/payments/{mercadoPagoPaymentId}
 //   ownerEmails/{sha256(email)}   keeps emails unique
+//   mpUsers/{mercadoPagoUserId}   one Mercado Pago account, one merchant
 // ---------------------------------------------------------------------------
 export class FirestoreStore implements Store {
   readonly kind = 'firestore' as const;
@@ -201,11 +251,41 @@ export class FirestoreStore implements Store {
       .get();
     return snap.docs.map((doc) => doc.data() as PaymentRecord).sort(newest);
   }
-  async upsertPayment(merchantId: string, fields: MpPaymentFields, source: PaymentRecord['source']) {
+  async getPayment(merchantId: string, paymentId: string) {
+    const snap = await this.payment(merchantId, paymentId).get();
+    return snap.exists ? (snap.data() as PaymentRecord) : null;
+  }
+  async updateMpIfUnchanged(merchantId: string, expectedRefreshTokenEnc: string, mp: MpConnection) {
+    const ref = this.merchants().doc(merchantId);
+    return this.db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if ((snap.data() as Merchant | undefined)?.mp?.refreshTokenEnc !== expectedRefreshTokenEnc) return false;
+      tx.update(ref, { mp: clean(mp) });
+      return true;
+    });
+  }
+  async claimMpUser(merchantId: string, mpUserId: string) {
+    const ref = this.db.collection('mpUsers').doc(mpUserId);
+    return this.db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (snap.exists) return snap.data()!.merchantId === merchantId;
+      tx.create(ref, { merchantId });
+      return true;
+    });
+  }
+  async releaseMpUser(merchantId: string, mpUserId: string) {
+    const ref = this.db.collection('mpUsers').doc(mpUserId);
+    await this.db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (snap.exists && snap.data()!.merchantId === merchantId) tx.delete(ref);
+    });
+  }
+  async upsertPayment(merchantId: string, fields: MpPaymentFields, source: PaymentRecord['source'], notBefore?: number) {
     const ref = this.payment(merchantId, fields.id);
     return this.db.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
-      const result = mergePayment(snap.exists ? (snap.data() as PaymentRecord) : null, clean(fields), source);
+      const result = mergePayment(snap.exists ? (snap.data() as PaymentRecord) : null, clean(fields), source, notBefore);
+      if (!result) return null;
       if (result.changed) {
         tx.set(ref, clean(result.payment));
         tx.update(this.merchants().doc(merchantId), { revision: this.increment(1) });

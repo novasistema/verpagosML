@@ -23,6 +23,11 @@ export interface MpPaymentFields {
   id: string;
   dateCreated: string;
   dateApproved: string | null;
+  /** Mercado Pago's last change: stops an older read from overwriting a newer one. */
+  dateLastUpdated?: string;
+  /** Mercado Pago account that received the money. */
+  collectorId?: string;
+  transactionAmountRefunded?: number;
   status: string;
   statusDetail: string;
   transactionAmount: number;
